@@ -1,0 +1,70 @@
+[package]
+name = "robosync"
+version = "0.1.0"
+edition = "2021"
+authors = ["RoboSync Contributors"]
+description = "Fast, parallel file synchronization with delta-transfer and RoboCopy interface"
+license = "MIT"
+repository = "https://github.com/yourusername/robosync"
+readme = "README.md"
+keywords = ["sync", "robocopy", "rsync", "backup", "file-transfer"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Cryptography and hashing
+blake3 = "1.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+md-5 = "0.10"
+
+# Compression
+zstd = "0.13"
+lz4_flex = "0.11"
+
+# File system operations
+walkdir = "2.0"
+filetime = "0.2"
+
+# Cross-platform support
+crossbeam = "0.8"
+rayon = "1.8"
+
+# Progress reporting
+indicatif = "0.17"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi"] }
+
+[dev-dependencies]
+tempfile = "3.0"
+criterion = "0.5"
+
+[[bin]]
+name = "robosync"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# Benchmarks will be added later
+# [[bench]]
+# name = "benchmarks" 
+# harness = false
