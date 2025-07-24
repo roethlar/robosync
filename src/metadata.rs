@@ -92,7 +92,7 @@ pub fn copy_file_with_metadata(
 
 /// Copy file timestamps (modification and access times)
 pub fn copy_timestamps(
-    source: &Path,
+    _source: &Path,
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
@@ -115,7 +115,7 @@ pub fn copy_timestamps(
 
 /// Copy file permissions
 pub fn copy_permissions(
-    source: &Path,
+    _source: &Path,
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
@@ -174,6 +174,29 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
     let atime = metadata.accessed()
         .context("Failed to get access time")?;
     let filetime_atime = filetime::FileTime::from(atime);
+    
+    // On Windows, we may need to temporarily remove readonly attribute
+    #[cfg(windows)]
+    {
+        let permissions = metadata.permissions();
+        if permissions.readonly() {
+            // Temporarily remove readonly attribute
+            let mut new_permissions = permissions.clone();
+            new_permissions.set_readonly(false);
+            fs::set_permissions(path, new_permissions)
+                .context("Failed to temporarily remove readonly attribute")?;
+            
+            // Set the times
+            let result = filetime::set_file_times(path, filetime_atime, filetime_mtime);
+            
+            // Restore original permissions
+            fs::set_permissions(path, permissions)
+                .context("Failed to restore readonly attribute")?;
+            
+            result.context("Failed to set file times")?;
+            return Ok(());
+        }
+    }
     
     // Set access time and modification time
     filetime::set_file_times(path, filetime_atime, filetime_mtime)
