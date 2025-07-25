@@ -158,7 +158,7 @@ impl SyncLogger {
         let elapsed_secs = elapsed.as_secs_f64();
 
         let rate_str = if elapsed_secs > 0.0 {
-            let bytes_per_sec = stats.bytes_transferred as f64 / elapsed_secs;
+            let bytes_per_sec = stats.bytes_transferred.load(std::sync::atomic::Ordering::Relaxed) as f64 / elapsed_secs;
             format_transfer_rate(bytes_per_sec)
         } else {
             "N/A".to_string()
@@ -167,7 +167,7 @@ impl SyncLogger {
         let summary = format!(
             "Parallel synchronization completed successfully! {} files, {} bytes transferred in {:.2}s ({})",
             self.completed_files,
-            stats.bytes_transferred,
+            stats.bytes_transferred.load(std::sync::atomic::Ordering::Relaxed),
             elapsed_secs,
             rate_str
         );

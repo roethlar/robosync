@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 use crate::options::SyncOptions;
+// Note: Removed unused imports - we now use blake3 directly for better performance
 
 /// File metadata for synchronization
 #[derive(Debug, Clone)]
@@ -13,6 +14,8 @@ pub struct FileInfo {
     pub size: u64,
     pub modified: std::time::SystemTime,
     pub is_directory: bool,
+    pub is_symlink: bool,
+    pub symlink_target: Option<PathBuf>,
     pub checksum: Option<Vec<u8>>,
 }
 
@@ -22,13 +25,32 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
     
     for entry in WalkDir::new(root) {
         let entry = entry?;
-        let metadata = entry.metadata()?;
+        let path = entry.path();
+        
+        // Use symlink_metadata to get info about the symlink itself, not its target
+        let metadata = std::fs::symlink_metadata(path)?;
+        let is_symlink = metadata.is_symlink();
+        
+        // Read symlink target if it's a symlink
+        let symlink_target = if is_symlink {
+            match std::fs::read_link(path) {
+                Ok(target) => Some(target),
+                Err(e) => {
+                    eprintln!("Warning: Failed to read symlink target for {}: {}", path.display(), e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         
         let file_info = FileInfo {
-            path: entry.path().to_path_buf(),
+            path: path.to_path_buf(),
             size: metadata.len(),
             modified: metadata.modified()?,
             is_directory: metadata.is_dir(),
+            is_symlink,
+            symlink_target,
             checksum: None, // Will be computed later if needed
         };
         
@@ -40,27 +62,103 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
 
 /// Generate file list from a directory with filtering
 pub fn generate_file_list_with_options(root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
-    let mut files = Vec::new();
+    generate_file_list_with_options_and_progress(root, options, None::<fn(usize)>)
+}
+
+/// Generate file list from a directory with filtering and optional progress callback
+pub fn generate_file_list_with_options_and_progress<F>(
+    root: &Path, 
+    options: &SyncOptions,
+    progress_callback: Option<F>
+) -> Result<Vec<FileInfo>> 
+where 
+    F: Fn(usize) + Send + Sync,
+{
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    
+    // First, collect all entries without checksums
+    let mut file_infos = Vec::new();
+    let mut files_needing_checksums = Vec::new();
+    let mut count = 0;
     
     for entry in WalkDir::new(root) {
         let entry = entry?;
-        let metadata = entry.metadata()?;
+        let path = entry.path();
         
-        let file_info = FileInfo {
-            path: entry.path().to_path_buf(),
+        // Use symlink_metadata to get info about the symlink itself, not its target
+        let metadata = std::fs::symlink_metadata(path)?;
+        let is_symlink = metadata.is_symlink();
+        
+        // Read symlink target if it's a symlink
+        let symlink_target = if is_symlink {
+            match std::fs::read_link(path) {
+                Ok(target) => Some(target),
+                Err(e) => {
+                    eprintln!("Warning: Failed to read symlink target for {}: {}", path.display(), e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut file_info = FileInfo {
+            path: path.to_path_buf(),
             size: metadata.len(),
             modified: metadata.modified()?,
             is_directory: metadata.is_dir(),
+            is_symlink,
+            symlink_target,
             checksum: None, // Will be computed later if needed
         };
         
         // Apply filters
         if should_include_file(&file_info, root, options) {
-            files.push(file_info);
+            // Check if we need to compute checksum for this file
+            if options.checksum && !is_symlink && !metadata.is_dir() {
+                files_needing_checksums.push(file_infos.len());
+            }
+            file_infos.push(file_info);
+        }
+        
+        // Update progress
+        count += 1;
+        if let Some(ref callback) = progress_callback {
+            callback(count);
         }
     }
     
-    Ok(files)
+    // Compute checksums in parallel if needed
+    if !files_needing_checksums.is_empty() {
+        let checksum_count = Arc::new(AtomicUsize::new(0));
+        let progress_cb = progress_callback.as_ref();
+        
+        // Process checksums in parallel batches
+        let checksums: Result<Vec<_>, _> = files_needing_checksums
+            .par_iter()
+            .map(|&index| {
+                let path = &file_infos[index].path;
+                let result = compute_file_checksum(path);
+                
+                // Update progress for checksum computation
+                if let Some(callback) = progress_cb {
+                    let current = checksum_count.fetch_add(1, Ordering::Relaxed);
+                    callback(count + current + 1);
+                }
+                
+                result.map(|checksum| (index, checksum))
+            })
+            .collect();
+            
+        // Apply computed checksums
+        for (index, checksum) in checksums? {
+            file_infos[index].checksum = checksum;
+        }
+    }
+    
+    Ok(file_infos)
 }
 
 /// Check if a file should be included based on filtering options
@@ -177,30 +275,95 @@ pub fn compare_file_lists_with_roots(
     source: &[FileInfo], 
     target: &[FileInfo],
     source_root: &Path,
-    dest_root: &Path
+    dest_root: &Path,
+    options: &SyncOptions
 ) -> Vec<FileOperation> {
-    let mut operations = Vec::new();
+    compare_file_lists_with_roots_and_progress(source, target, source_root, dest_root, options, None::<fn(usize)>)
+}
+
+/// Compare two file lists to find differences with progress callback, normalizing paths relative to their roots
+pub fn compare_file_lists_with_roots_and_progress<F>(
+    source: &[FileInfo], 
+    target: &[FileInfo],
+    source_root: &Path,
+    dest_root: &Path,
+    options: &SyncOptions,
+    progress_callback: Option<F>
+) -> Vec<FileOperation> 
+where
+    F: Fn(usize) + Send + Sync,
+{
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     
-    // Create maps for efficient lookup using relative paths
-    let mut target_map: HashMap<PathBuf, &FileInfo> = HashMap::new();
-    for file in target {
-        if let Ok(relative_path) = file.path.strip_prefix(dest_root) {
-            target_map.insert(relative_path.to_path_buf(), file);
-        }
-    }
+    // Pre-compute target map with relative paths for faster lookup
+    let target_map: HashMap<PathBuf, &FileInfo> = target
+        .par_iter()
+        .filter_map(|file| {
+            file.path.strip_prefix(dest_root)
+                .ok()
+                .map(|relative_path| (relative_path.to_path_buf(), file))
+        })
+        .collect();
     
-    let mut processed_targets = HashSet::new();
+    let processed_count = Arc::new(AtomicUsize::new(0));
+    let progress_update_interval = std::cmp::max(1, source.len() / 100); // Update every 1% or at least every file
     
-    // Process each source file
-    for source_file in source {
-        if let Ok(relative_path) = source_file.path.strip_prefix(source_root) {
-            if let Some(target_file) = target_map.get(relative_path) {
+    // Process source files in parallel
+    let (source_operations, processed_targets): (Vec<_>, Vec<_>) = source
+        .par_iter()
+        .filter_map(|source_file| {
+            source_file.path.strip_prefix(source_root)
+                .ok()
+                .map(|relative_path| (source_file, relative_path.to_path_buf()))
+        })
+        .map(|(source_file, relative_path)| {
+            // Update progress periodically, not for every file
+            let count = processed_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(ref callback) = progress_callback {
+                if count % progress_update_interval == 0 || count == source.len() - 1 {
+                    callback(count + 1);
+                }
+            }
+            
+            let mut operations = Vec::new();
+            let mut processed_target = None;
+            
+            if let Some(target_file) = target_map.get(&relative_path) {
                 // File exists in both source and target
-                processed_targets.insert(relative_path.to_path_buf());
+                processed_target = Some(relative_path.clone());
                 
-                if source_file.is_directory && target_file.is_directory {
+                // Handle symlinks first
+                if source_file.is_symlink && target_file.is_symlink {
+                    // Both are symlinks, check if they point to the same target
+                    if source_file.symlink_target != target_file.symlink_target {
+                        if let Some(ref target) = source_file.symlink_target {
+                            operations.push(FileOperation::UpdateSymlink { 
+                                path: source_file.path.clone(), 
+                                target: target.clone() 
+                            });
+                        }
+                    }
+                } else if source_file.is_symlink && !target_file.is_symlink {
+                    // Source is symlink, target is not - delete target and create symlink
+                    operations.push(FileOperation::Delete { path: source_file.path.clone() });
+                    if let Some(ref target) = source_file.symlink_target {
+                        operations.push(FileOperation::CreateSymlink { 
+                            path: source_file.path.clone(), 
+                            target: target.clone() 
+                        });
+                    }
+                } else if !source_file.is_symlink && target_file.is_symlink {
+                    // Source is not symlink, target is - delete symlink and create file/dir
+                    operations.push(FileOperation::Delete { path: source_file.path.clone() });
+                    if source_file.is_directory {
+                        operations.push(FileOperation::CreateDirectory { path: source_file.path.clone() });
+                    } else {
+                        operations.push(FileOperation::Create { path: source_file.path.clone() });
+                    }
+                } else if source_file.is_directory && target_file.is_directory {
                     // Both are directories, no action needed
-                    continue;
                 } else if source_file.is_directory && !target_file.is_directory {
                     // Source is directory, target is file - delete file and create directory
                     operations.push(FileOperation::Delete { path: source_file.path.clone() });
@@ -211,7 +374,7 @@ pub fn compare_file_lists_with_roots(
                     operations.push(FileOperation::Create { path: source_file.path.clone() });
                 } else if !source_file.is_directory && !target_file.is_directory {
                     // Both are files, check if update is needed
-                    if needs_update(source_file, target_file) {
+                    if needs_update(source_file, target_file, options) {
                         let use_delta = should_use_delta(source_file, target_file);
                         operations.push(FileOperation::Update { 
                             path: source_file.path.clone(), 
@@ -221,29 +384,69 @@ pub fn compare_file_lists_with_roots(
                 }
             } else {
                 // File exists only in source (new file)
-                if source_file.is_directory {
+                if source_file.is_symlink {
+                    if let Some(ref target) = source_file.symlink_target {
+                        operations.push(FileOperation::CreateSymlink { 
+                            path: source_file.path.clone(), 
+                            target: target.clone() 
+                        });
+                    }
+                } else if source_file.is_directory {
                     operations.push(FileOperation::CreateDirectory { path: source_file.path.clone() });
                 } else {
                     operations.push(FileOperation::Create { path: source_file.path.clone() });
                 }
             }
-        }
+            
+            (operations, processed_target)
+        })
+        .unzip();
+    
+    // Flatten operations from parallel processing
+    let mut operations: Vec<FileOperation> = source_operations.into_iter().flatten().collect();
+    
+    // Collect processed targets for deletion check
+    let processed_targets: HashSet<PathBuf> = processed_targets.into_iter().flatten().collect();
+    
+    // Process files that exist only in target (deleted files) - also in parallel
+    // Skip this if purge mode is enabled to avoid duplicates (purge operations are handled separately)
+    let target_operations: Vec<FileOperation> = if !options.purge && !options.mirror {
+        target
+            .par_iter()
+            .filter_map(|target_file| {
+                target_file.path.strip_prefix(dest_root)
+                    .ok()
+                    .and_then(|relative_path| {
+                        if !processed_targets.contains(relative_path) {
+                            Some(FileOperation::Delete { path: target_file.path.clone() })
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    
+    // Update progress for target processing
+    if let Some(ref callback) = progress_callback {
+        callback(source.len() + target.len());
     }
     
-    // Process files that exist only in target (deleted files) 
-    for target_file in target {
-        if let Ok(relative_path) = target_file.path.strip_prefix(dest_root) {
-            if !processed_targets.contains(relative_path) {
-                operations.push(FileOperation::Delete { path: target_file.path.clone() });
-            }
-        }
-    }
-    
+    operations.extend(target_operations);
     operations
 }
 
 /// Compare two file lists to find differences (legacy function for backward compatibility)
 pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileOperation> {
+    // Use default options for backward compatibility
+    let default_options = SyncOptions::default();
+    compare_file_lists_with_options(source, target, &default_options)
+}
+
+/// Compare two file lists to find differences with options
+pub fn compare_file_lists_with_options(source: &[FileInfo], target: &[FileInfo], options: &SyncOptions) -> Vec<FileOperation> {
     let mut operations = Vec::new();
     
     // Create maps for efficient lookup
@@ -260,7 +463,35 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
             // File exists in both source and target
             processed_targets.insert(&source_file.path);
             
-            if source_file.is_directory && target_file.is_directory {
+            // Handle symlinks first
+            if source_file.is_symlink && target_file.is_symlink {
+                // Both are symlinks, check if they point to the same target
+                if source_file.symlink_target != target_file.symlink_target {
+                    if let Some(ref target) = source_file.symlink_target {
+                        operations.push(FileOperation::UpdateSymlink { 
+                            path: source_file.path.clone(), 
+                            target: target.clone() 
+                        });
+                    }
+                }
+            } else if source_file.is_symlink && !target_file.is_symlink {
+                // Source is symlink, target is not - delete target and create symlink
+                operations.push(FileOperation::Delete { path: source_file.path.clone() });
+                if let Some(ref target) = source_file.symlink_target {
+                    operations.push(FileOperation::CreateSymlink { 
+                        path: source_file.path.clone(), 
+                        target: target.clone() 
+                    });
+                }
+            } else if !source_file.is_symlink && target_file.is_symlink {
+                // Source is not symlink, target is - delete symlink and create file/dir
+                operations.push(FileOperation::Delete { path: source_file.path.clone() });
+                if source_file.is_directory {
+                    operations.push(FileOperation::CreateDirectory { path: source_file.path.clone() });
+                } else {
+                    operations.push(FileOperation::Create { path: source_file.path.clone() });
+                }
+            } else if source_file.is_directory && target_file.is_directory {
                 // Both are directories, no action needed
                 continue;
             } else if source_file.is_directory && !target_file.is_directory {
@@ -273,7 +504,7 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
                 operations.push(FileOperation::Create { path: source_file.path.clone() });
             } else if !source_file.is_directory && !target_file.is_directory {
                 // Both are files, check if update is needed
-                if needs_update(source_file, target_file) {
+                if needs_update(source_file, target_file, options) {
                     let use_delta = should_use_delta(source_file, target_file);
                     operations.push(FileOperation::Update { 
                         path: source_file.path.clone(), 
@@ -283,7 +514,14 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
             }
         } else {
             // File exists only in source (new file)
-            if source_file.is_directory {
+            if source_file.is_symlink {
+                if let Some(ref target) = source_file.symlink_target {
+                    operations.push(FileOperation::CreateSymlink { 
+                        path: source_file.path.clone(), 
+                        target: target.clone() 
+                    });
+                }
+            } else if source_file.is_directory {
                 operations.push(FileOperation::CreateDirectory { path: source_file.path.clone() });
             } else {
                 operations.push(FileOperation::Create { path: source_file.path.clone() });
@@ -316,8 +554,22 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
 }
 
 /// Determine if a file needs to be updated
-fn needs_update(source: &FileInfo, target: &FileInfo) -> bool {
-    // Compare modification time and size
+fn needs_update(source: &FileInfo, target: &FileInfo, options: &SyncOptions) -> bool {
+    // If checksum mode is enabled, compare checksums if both are available
+    if options.checksum {
+        match (&source.checksum, &target.checksum) {
+            (Some(source_checksum), Some(target_checksum)) => {
+                // Both have checksums, compare them
+                return source_checksum != target_checksum;
+            }
+            _ => {
+                // If checksums are not available, fall back to traditional comparison
+                // This can happen during the transition or if checksum calculation failed
+            }
+        }
+    }
+    
+    // Traditional comparison: modification time and size
     source.modified > target.modified || source.size != target.size
 }
 
@@ -342,6 +594,30 @@ fn should_use_delta(source: &FileInfo, target: &FileInfo) -> bool {
     size_diff_ratio < MAX_SIZE_DIFFERENCE_RATIO
 }
 
+/// Compute checksum for a file using Blake3 (fast, secure, default) with streaming
+fn compute_file_checksum(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::fs::File;
+    use std::io::{Read, BufReader};
+    
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file); // 64KB buffer
+    
+    // Use Blake3 streaming hasher for memory efficiency
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    
+    let hash = hasher.finalize();
+    Ok(Some(hash.as_bytes().to_vec()))
+}
+
 /// Operations that need to be performed during sync
 #[derive(Debug, Clone)]
 pub enum FileOperation {
@@ -349,6 +625,8 @@ pub enum FileOperation {
     Update { path: PathBuf, use_delta: bool },
     Delete { path: PathBuf },
     CreateDirectory { path: PathBuf },
+    CreateSymlink { path: PathBuf, target: PathBuf },
+    UpdateSymlink { path: PathBuf, target: PathBuf },
 }
 
 #[cfg(test)]
@@ -362,6 +640,8 @@ mod tests {
             size,
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_offset),
             is_directory: is_dir,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         }
     }
@@ -398,10 +678,11 @@ mod tests {
         let old_file = create_test_file("file.txt", 100, 1000, false);
         let new_file = create_test_file("file.txt", 100, 2000, false);
         let different_size = create_test_file("file.txt", 200, 1000, false);
+        let options = SyncOptions::default(); // No checksum comparison
         
-        assert!(needs_update(&new_file, &old_file)); // Newer modification time
-        assert!(needs_update(&different_size, &old_file)); // Different size
-        assert!(!needs_update(&old_file, &new_file)); // Older file
+        assert!(needs_update(&new_file, &old_file, &options)); // Newer modification time
+        assert!(needs_update(&different_size, &old_file, &options)); // Different size
+        assert!(!needs_update(&old_file, &new_file, &options)); // Older file
     }
 
     #[test]
@@ -459,6 +740,9 @@ mod tests {
             compress: false,
             compression_config: crate::compression::CompressionConfig::default(),
             show_eta: false,
+            retry_count: 0,
+            retry_wait: 30,
+            checksum: false,
         };
         
         let root = std::path::Path::new("/test");
@@ -469,6 +753,8 @@ mod tests {
             size: 500,
             modified: std::time::SystemTime::UNIX_EPOCH,
             is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         };
         assert!(!should_include_file(&tmp_file, root, &options));
@@ -479,6 +765,8 @@ mod tests {
             size: 50,
             modified: std::time::SystemTime::UNIX_EPOCH,
             is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         };
         assert!(!should_include_file(&small_file, root, &options));
@@ -489,6 +777,8 @@ mod tests {
             size: 20000,
             modified: std::time::SystemTime::UNIX_EPOCH,
             is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         };
         assert!(!should_include_file(&large_file, root, &options));
@@ -499,6 +789,8 @@ mod tests {
             size: 5000,
             modified: std::time::SystemTime::UNIX_EPOCH,
             is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         };
         assert!(should_include_file(&good_file, root, &options));
@@ -509,8 +801,117 @@ mod tests {
             size: 0,
             modified: std::time::SystemTime::UNIX_EPOCH,
             is_directory: true,
+            is_symlink: false,
+            symlink_target: None,
             checksum: None,
         };
         assert!(!should_include_file(&cache_dir, root, &options));
+    }
+
+    #[test]
+    fn test_symlink_operations() {
+        use std::path::PathBuf;
+        
+        // Create test symlink file info
+        let symlink_file = FileInfo {
+            path: PathBuf::from("/test/link.txt"),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            is_directory: false,
+            is_symlink: true,
+            symlink_target: Some(PathBuf::from("target.txt")),
+            checksum: None,
+        };
+        
+        let target_regular_file = FileInfo {
+            path: PathBuf::from("/test/link.txt"),
+            size: 100,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
+            checksum: None,
+        };
+        
+        // Test symlink to regular file replacement
+        let operations = compare_file_lists(&[symlink_file.clone()], &[target_regular_file.clone()]);
+        assert_eq!(operations.len(), 2);
+        // Operations are sorted: directories first, then other operations, then deletions last
+        assert!(matches!(operations[0], FileOperation::CreateSymlink { .. }));
+        assert!(matches!(operations[1], FileOperation::Delete { .. }));
+        
+        // Test regular file to symlink replacement
+        let operations = compare_file_lists(&[target_regular_file], &[symlink_file.clone()]);
+        assert_eq!(operations.len(), 2);
+        // Operations are sorted: directories first, then other operations, then deletions last
+        assert!(matches!(operations[0], FileOperation::Create { .. }));
+        assert!(matches!(operations[1], FileOperation::Delete { .. }));
+        
+        // Test symlink target change
+        let symlink_file2 = FileInfo {
+            path: PathBuf::from("/test/link.txt"),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            is_directory: false,
+            is_symlink: true,
+            symlink_target: Some(PathBuf::from("different_target.txt")),
+            checksum: None,
+        };
+        
+        let operations = compare_file_lists(&[symlink_file2], &[symlink_file]);
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(operations[0], FileOperation::UpdateSymlink { .. }));
+    }
+
+    #[test]
+    fn test_checksum_comparison() {
+        use std::path::PathBuf;
+        
+        // Create files with same size and time but different content (different checksums)
+        let checksum1 = Some(vec![1, 2, 3, 4]);
+        let checksum2 = Some(vec![5, 6, 7, 8]);
+        
+        let file1 = FileInfo {
+            path: PathBuf::from("/test/file.txt"),
+            size: 100,
+            modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000),
+            is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
+            checksum: checksum1.clone(),
+        };
+        
+        let file2 = FileInfo {
+            path: PathBuf::from("/test/file.txt"),
+            size: 100, // Same size
+            modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000), // Same time
+            is_directory: false,
+            is_symlink: false,
+            symlink_target: None,
+            checksum: checksum2, // Different checksum
+        };
+        
+        // Test with checksum mode enabled
+        let checksum_options = SyncOptions {
+            checksum: true,
+            ..Default::default()
+        };
+        
+        // Should detect difference with checksum mode
+        assert!(needs_update(&file1, &file2, &checksum_options));
+        
+        // Test with checksum mode disabled (default behavior)
+        let normal_options = SyncOptions::default();
+        
+        // Should NOT detect difference without checksum mode (same size and time)
+        assert!(!needs_update(&file1, &file2, &normal_options));
+        
+        // Test with identical checksums
+        let file3 = FileInfo {
+            checksum: checksum1.clone(),
+            ..file2.clone()
+        };
+        
+        assert!(!needs_update(&file1, &file3, &checksum_options));
     }
 }
