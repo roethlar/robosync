@@ -48,7 +48,7 @@ robosync /path/to/source /path/to/destination
 robosync /source /dest --mir
 
 # Dry run to preview changes
-robosync /source /dest --dry-run
+robosync /source /dest --dry-run  # or -n
 ```
 
 ### Advanced Options
@@ -58,10 +58,10 @@ robosync /source /dest --dry-run
 robosync /source /dest --mt 8
 
 # Enable compression for network transfers
-robosync /source /dest --compress
+robosync /source /dest --compress  # or -z
 
 # Retry failed operations 3 times with 5-second delays
-robosync /source /dest --r 3 --w 5
+robosync /source /dest -r 3 -w 5
 
 # Exclude certain file patterns
 robosync /source /dest --xf "*.tmp" --xf "*.log"
@@ -76,8 +76,8 @@ robosync /source /dest --verbose
 ## Command-Line Options
 
 ### Core Options
-- `--s` - Copy subdirectories, but not empty ones
-- `--e` - Copy subdirectories, including empty ones
+- `-s` - Copy subdirectories, but not empty ones
+- `-e` - Copy subdirectories, including empty ones
 - `--mir` - Mirror a directory tree (equivalent to /E plus /PURGE)
 - `--purge` - Delete dest files/dirs that no longer exist in source
 - `--mov` - Move files (delete source after successful copy)
@@ -98,8 +98,8 @@ robosync /source /dest --verbose
 - `--block-size <SIZE>` - Block size for delta algorithm
 
 ### Retry Options
-- `--r <NUM>` - Number of retries on failed copies
-- `--w <SECONDS>` - Wait time between retries
+- `-r <NUM>` or `--retry <NUM>` - Number of retries on failed copies
+- `-w <SECONDS>` or `--wait <SECONDS>` - Wait time between retries
 
 ### Output Options
 - `--verbose` - Detailed output
