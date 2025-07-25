@@ -51,6 +51,7 @@ impl SyncProgress {
         self.completed_files += 1;
         self.transferred_bytes.fetch_add(file_size, Ordering::Relaxed);
         
+        
         // Update progress bar with throughput
         if let Some(ref pb) = self.progress_bar {
             pb.set_position(self.completed_files);
@@ -62,6 +63,7 @@ impl SyncProgress {
                 let throughput = (bytes_total as f64 / elapsed) as u64;
                 pb.set_message(format!("{}/s", indicatif::HumanBytes(throughput)));
             }
+        } else {
         }
     }
     

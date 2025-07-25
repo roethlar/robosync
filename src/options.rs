@@ -9,7 +9,8 @@ pub struct SyncOptions {
     pub purge: bool,
     pub mirror: bool,
     pub dry_run: bool,
-    pub verbose: bool,
+    pub verbose: u8,  // 0 = quiet, 1 = -v, 2 = -vv
+    pub confirm: bool,
     pub no_progress: bool,
     pub move_files: bool,
     pub exclude_files: Vec<String>,
@@ -23,6 +24,7 @@ pub struct SyncOptions {
     pub show_eta: bool,
     pub retry_count: u32,
     pub retry_wait: u32,
+    pub checksum: bool,
 }
 
 impl Default for SyncOptions {
@@ -32,7 +34,8 @@ impl Default for SyncOptions {
             purge: false,
             mirror: false,
             dry_run: false,
-            verbose: false,
+            verbose: 0,
+            confirm: false,
             no_progress: false,
             move_files: false,
             exclude_files: Vec::new(),
@@ -46,6 +49,7 @@ impl Default for SyncOptions {
             show_eta: false,
             retry_count: 0,
             retry_wait: 30,
+            checksum: false,
         }
     }
 }

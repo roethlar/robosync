@@ -149,7 +149,13 @@ fn main() -> Result<()> {
                 .long("verbose")
                 .alias("Verbose")
                 .alias("VERBOSE")
-                .help("Produce verbose output, showing skipped files (/V)")
+                .help("Produce verbose output (-v shows operations preview, -vv shows all operations)")
+                .action(clap::ArgAction::Count)
+        )
+        .arg(
+            Arg::new("confirm")
+                .long("confirm")
+                .help("Prompt for confirmation before executing operations")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
@@ -270,6 +276,15 @@ fn main() -> Result<()> {
                 .help("Show what would be done without actually doing it")
                 .action(clap::ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("checksum")
+                .short('c')
+                .long("checksum")
+                .alias("Checksum")
+                .alias("CHECKSUM")
+                .help("Skip based on checksum, not mod-time & size")
+                .action(clap::ArgAction::SetTrue)
+        )
         .get_matches();
 
     let source: PathBuf = matches.get_one::<PathBuf>("source").unwrap().clone();
@@ -279,10 +294,12 @@ fn main() -> Result<()> {
     let compress = matches.get_flag("compress");
     let sequential = matches.get_flag("sequential");
     let parallel = !sequential;
-    let verbose = matches.get_flag("verbose");
+    let verbose = matches.get_count("verbose") as u8;
+    let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
     let no_progress = matches.get_flag("no-progress");
     let move_files = matches.get_flag("move-files");
+    let checksum = matches.get_flag("checksum");
     
     // Copy options
     let subdirs = matches.get_flag("subdirs");
@@ -354,7 +371,9 @@ fn main() -> Result<()> {
     if recursive { options.push("recursive"); }
     if purge { options.push("purge"); }
     if mirror { options.push("mirror"); }
-    if verbose { options.push("verbose"); }
+    let verbose_str = format!("verbose={}", verbose);
+    if verbose > 0 { options.push(&verbose_str); }
+    if confirm { options.push("confirm"); }
     if compress { options.push("compress"); }
     if move_files { options.push("move-files"); }
     if !exclude_files.is_empty() { options.push("exclude-files"); }
@@ -383,6 +402,7 @@ fn main() -> Result<()> {
         mirror,
         dry_run,
         verbose,
+        confirm,
         no_progress,
         move_files,
         exclude_files,
@@ -396,6 +416,7 @@ fn main() -> Result<()> {
         show_eta,
         retry_count,
         retry_wait,
+        checksum,
     };
 
     if parallel && !dry_run {

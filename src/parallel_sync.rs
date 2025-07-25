@@ -120,11 +120,12 @@ impl ParallelSyncer {
         // Create logger and multi-progress for this sync operation
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
         
-        // Create MultiProgress for analysis phase
-        let multi_progress = if options.no_progress {
+        // Create MultiProgress for analysis phase - disable for -vv mode
+        let multi_progress = if options.no_progress || options.verbose >= 2 {
             None
         } else {
-            Some(MultiProgress::new())
+            // In indicatif 0.18, MultiProgress automatically handles rendering
+            Some(Arc::new(MultiProgress::new()))
         };
         
         // Scan source directory with progress
@@ -283,50 +284,145 @@ impl ParallelSyncer {
             operations.iter().filter(|op| matches!(op, FileOperation::Delete { .. })).count()
         ));
 
-        // Show file list in verbose mode
-        if options.verbose {
-            logger.log("\nFile operations to be performed:");
-            for operation in &operations {
-                match operation {
-                    FileOperation::Create { path } => {
-                        if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
-                            if file_info.is_directory {
-                                logger.log(&format!("    New Dir                      {}", path.display()));
-                            } else {
-                                logger.log(&format!("    New File        {:>12}  {}", file_info.size, path.display()));
+        // Show file list only in verbose mode
+        if options.verbose >= 1 {
+            // Use MultiProgress's println if available, otherwise use logger
+            if let Some(ref mp) = multi_progress {
+                let _ = mp.println("\nFile operations to be performed:");
+                for operation in &operations {
+                    match operation {
+                        FileOperation::Create { path } => {
+                            if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
+                                if file_info.is_directory {
+                                    let _ = mp.println(format!("    New Dir                      {}", path.display()));
+                                } else {
+                                    let _ = mp.println(format!("    New File        {:>12}  {}", file_info.size, path.display()));
+                                }
                             }
                         }
-                    }
-                    FileOperation::Update { path, use_delta } => {
-                        if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
-                            let method = if *use_delta { "Delta" } else { "Newer" };
-                            logger.log(&format!("    {}           {:>12}  {}", method, file_info.size, path.display()));
+                        FileOperation::Update { path, use_delta } => {
+                            if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
+                                let method = if *use_delta { "Delta" } else { "Newer" };
+                                let _ = mp.println(format!("    {}           {:>12}  {}", method, file_info.size, path.display()));
+                            }
                         }
-                    }
-                    FileOperation::Delete { path } => {
-                        if path.is_file() {
-                            let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                            logger.log(&format!("    *EXTRA File     {:>12}  {}", file_size, path.display()));
-                        } else {
-                            logger.log(&format!("    *EXTRA Dir                   {}", path.display()));
+                        FileOperation::Delete { path } => {
+                            if path.is_file() {
+                                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                                let _ = mp.println(format!("    *EXTRA File     {:>12}  {}", file_size, path.display()));
+                            } else {
+                                let _ = mp.println(format!("    *EXTRA Dir                   {}", path.display()));
+                            }
                         }
-                    }
-                    FileOperation::CreateDirectory { path } => {
-                        logger.log(&format!("    New Dir                      {}", path.display()));
-                    }
-                    FileOperation::CreateSymlink { path, target } => {
-                        logger.log(&format!("    New Symlink                  {} -> {}", path.display(), target.display()));
-                    }
-                    FileOperation::UpdateSymlink { path, target } => {
-                        logger.log(&format!("    Update Symlink               {} -> {}", path.display(), target.display()));
+                        FileOperation::CreateDirectory { path } => {
+                            let _ = mp.println(format!("    New Dir                      {}", path.display()));
+                        }
+                        FileOperation::CreateSymlink { path, target } => {
+                            let _ = mp.println(format!("    New Symlink                  {} -> {}", path.display(), target.display()));
+                        }
+                        FileOperation::UpdateSymlink { path, target } => {
+                            let _ = mp.println(format!("    Update Symlink               {} -> {}", path.display(), target.display()));
+                        }
                     }
                 }
+                let _ = mp.println("");
+            } else {
+                logger.log("\nFile operations to be performed:");
+                for operation in &operations {
+                    match operation {
+                        FileOperation::Create { path } => {
+                            if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
+                                if file_info.is_directory {
+                                    logger.log(&format!("    New Dir                      {}", path.display()));
+                                } else {
+                                    logger.log(&format!("    New File        {:>12}  {}", file_info.size, path.display()));
+                                }
+                            }
+                        }
+                        FileOperation::Update { path, use_delta } => {
+                            if let Some(file_info) = source_files.iter().find(|f| f.path == *path) {
+                                let method = if *use_delta { "Delta" } else { "Newer" };
+                                logger.log(&format!("    {}           {:>12}  {}", method, file_info.size, path.display()));
+                            }
+                        }
+                        FileOperation::Delete { path } => {
+                            if path.is_file() {
+                                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                                logger.log(&format!("    *EXTRA File     {:>12}  {}", file_size, path.display()));
+                            } else {
+                                logger.log(&format!("    *EXTRA Dir                   {}", path.display()));
+                            }
+                        }
+                        FileOperation::CreateDirectory { path } => {
+                            logger.log(&format!("    New Dir                      {}", path.display()));
+                        }
+                        FileOperation::CreateSymlink { path, target } => {
+                            logger.log(&format!("    New Symlink                  {} -> {}", path.display(), target.display()));
+                        }
+                        FileOperation::UpdateSymlink { path, target } => {
+                            logger.log(&format!("    Update Symlink               {} -> {}", path.display(), target.display()));
+                        }
+                    }
+                }
+                logger.log("");
             }
+        }
+        
+        // Ask for confirmation if requested
+        if options.confirm && !operations.is_empty() {
+            use std::io::{self, Write};
+            
+            // Show progress while counting operations for summary
+            logger.log("Preparing operation summary...");
+            
+            // Count operation types for summary
+            let mut new_files = 0;
+            let mut new_dirs = 0;
+            let mut updates = 0;
+            let mut deletions = 0;
+            let mut symlinks = 0;
+            
+            for op in &operations {
+                match op {
+                    FileOperation::Create { path } => {
+                        if source_file_map.get(path).map_or(false, |f| f.is_directory) {
+                            new_dirs += 1;
+                        } else {
+                            new_files += 1;
+                        }
+                    }
+                    FileOperation::CreateDirectory { .. } => new_dirs += 1,
+                    FileOperation::Update { .. } => updates += 1,
+                    FileOperation::Delete { .. } => deletions += 1,
+                    FileOperation::CreateSymlink { .. } | FileOperation::UpdateSymlink { .. } => symlinks += 1,
+                }
+            }
+            
+            // For confirmation, always use regular output to avoid MultiProgress clearing
+            logger.log("\nPending Operation Summary:");
+            if new_files > 0 { logger.log(&format!("  New Files: {}", new_files)); }
+            if new_dirs > 0 { logger.log(&format!("  New Directories: {}", new_dirs)); }
+            if updates > 0 { logger.log(&format!("  Updates: {}", updates)); }
+            if deletions > 0 { logger.log(&format!("  Deletions: {}", deletions)); }
+            if symlinks > 0 { logger.log(&format!("  Symlinks: {}", symlinks)); }
             logger.log("");
+            
+            // Ask for confirmation
+            print!("Continue? Y/n: ");
+            io::stdout().flush().unwrap();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap();
+            let input = input.trim().to_lowercase();
+            
+            if input != "y" && input != "yes" && input != "" {
+                logger.log("Operation cancelled by user.");
+                return Ok(SyncStats::default());
+            }
         }
 
-        // Create progress tracking - now available even in verbose mode with MultiProgress  
-        let progress = if options.no_progress {
+
+        // Create progress tracking - disable for -vv mode
+        let progress = if options.no_progress || options.verbose >= 2 {
             None
         } else {
             // Create progress bar that works with MultiProgress for verbose mode compatibility
@@ -334,10 +430,11 @@ impl ParallelSyncer {
                 let pb = mp.add(ProgressBar::new(total_files));
                 pb.set_style(
                     ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} files ({per_sec}, {eta})")
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} files ({per_sec}, {eta}) {msg}")
                         .unwrap()
                         .progress_chars("#>-"),
                 );
+                pb.enable_steady_tick(std::time::Duration::from_millis(100));
                 Some(pb)
             } else {
                 None
@@ -416,7 +513,9 @@ impl ParallelSyncer {
                         if let Some(ref progress) = progress {
                             if let Ok(mut p) = progress.lock() {
                                 p.update_file_complete(file_stats.get_bytes_transferred());
+                            } else {
                             }
+                        } else {
                         }
                         
                         
@@ -445,9 +544,10 @@ impl ParallelSyncer {
             }
         }
         
-        // Finish the copy progress bar in verbose mode
-
-        // MultiProgress will automatically clean up when dropped
+        // Clear the MultiProgress to ensure clean output
+        if let Some(ref mp) = multi_progress {
+            mp.clear().ok();
+        }
         
         let final_stats = Arc::try_unwrap(stats).unwrap();
         logger.log_summary(&final_stats);
@@ -468,6 +568,11 @@ impl ParallelSyncer {
         match operation {
             FileOperation::CreateDirectory { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
+                
+                if options.verbose >= 2 {
+                    logger.log(&format!("    Creating Dir                 {}", dest_path.display()));
+                }
+                
                 fs::create_dir_all(&dest_path)
                     .with_context(|| format!("Failed to create directory: {}", dest_path.display()))?;
                 Ok(SyncStats::default())
@@ -479,7 +584,9 @@ impl ParallelSyncer {
                 }
                 let file_size = fs::metadata(&path)?.len();
                 
-                // Verbose logging now happens in the pre-execution phase only to avoid interfering with progress bars
+                if options.verbose >= 2 {
+                    logger.log(&format!("    Copying File    {:>12}  {} -> {}", file_size, path.display(), dest_path.display()));
+                }
                 
                 // Parse copy flags and copy file with metadata  
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
@@ -490,7 +597,7 @@ impl ParallelSyncer {
                     fs::remove_file(&path)
                         .with_context(|| format!("Failed to delete source file after move: {}", path.display()))?;
                     
-                    if options.verbose {
+                    if options.verbose >= 2 {
                         let message = format!("    Moved File      {:>12}  {} -> {}", file_size, path.display(), dest_path.display());
                         logger.log(&message);
                     }
@@ -505,11 +612,11 @@ impl ParallelSyncer {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
                 let file_size = fs::metadata(&path)?.len();
                 
-                if options.verbose {
+                if options.verbose >= 2 {
                     let message = if use_delta {
-                        format!("    Newer           {:>12}  {}", file_size, dest_path.display())
+                        format!("    Updating (Delta) {:>12}  {}", file_size, dest_path.display())
                     } else {
-                        format!("    Older           {:>12}  {}", file_size, dest_path.display())
+                        format!("    Updating (Full)  {:>12}  {}", file_size, dest_path.display())
                     };
                     logger.log(&message);
                 }
@@ -528,7 +635,7 @@ impl ParallelSyncer {
                         fs::remove_file(&path)
                             .with_context(|| format!("Failed to delete source file after move: {}", path.display()))?;
                         
-                        if options.verbose {
+                        if options.verbose >= 2 {
                             let message = format!("    Moved File      {:>12}  {} -> {}", file_size, path.display(), dest_path.display());
                             logger.log(&message);
                         }
@@ -545,7 +652,14 @@ impl ParallelSyncer {
                 let metadata = fs::symlink_metadata(&path)
                     .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
                 
-                // Verbose output already shown in operation listing, don't duplicate here
+                if options.verbose >= 2 {
+                    if metadata.is_file() {
+                        let file_size = metadata.len();
+                        logger.log(&format!("    Deleting File   {:>12}  {}", file_size, path.display()));
+                    } else {
+                        logger.log(&format!("    Deleting Dir                 {}", path.display()));
+                    }
+                }
                 
                 if metadata.is_symlink() || metadata.is_file() {
                     fs::remove_file(&path)
@@ -562,7 +676,7 @@ impl ParallelSyncer {
                     fs::create_dir_all(parent)?;
                 }
                 
-                if options.verbose {
+                if options.verbose >= 2 {
                     let message = format!("    New Symlink                  {} -> {}", dest_path.display(), target.display());
                     logger.log(&message);
                 }
@@ -573,7 +687,7 @@ impl ParallelSyncer {
             FileOperation::UpdateSymlink { path, target } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
                 
-                if options.verbose {
+                if options.verbose >= 2 {
                     let message = format!("    Update Symlink               {} -> {}", dest_path.display(), target.display());
                     logger.log(&message);
                 }
@@ -602,6 +716,13 @@ impl ParallelSyncer {
         match operation {
             FileOperation::CreateDirectory { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
+                
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
+                        log.log(&format!("    Creating Dir                 {}", dest_path.display()));
+                    }
+                }
+                
                 fs::create_dir_all(&dest_path)
                     .with_context(|| format!("Failed to create directory: {}", dest_path.display()))?;
                 
@@ -619,7 +740,11 @@ impl ParallelSyncer {
                 }
                 let file_size = fs::metadata(&path)?.len();
                 
-                // Verbose logging now happens in the pre-execution phase only to avoid interfering with progress bars
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
+                        log.log(&format!("    Copying File    {:>12}  {} -> {}", file_size, path.display(), dest_path.display()));
+                    }
+                }
                 
                 // Parse copy flags and copy file with metadata
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
@@ -648,12 +773,12 @@ impl ParallelSyncer {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
                 let file_size = fs::metadata(&path)?.len();
                 
-                if options.verbose {
-                    if let Ok(mut log) = logger.lock() {
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
                         if use_delta {
-                            log.log(&format!("    Newer           {:>12}  {}", file_size, dest_path.display()));
+                            log.log(&format!("    Updating (Delta) {:>12}  {}", file_size, dest_path.display()));
                         } else {
-                            log.log(&format!("    Older           {:>12}  {}", file_size, dest_path.display()));
+                            log.log(&format!("    Updating (Full)  {:>12}  {}", file_size, dest_path.display()));
                         }
                     }
                 }
@@ -670,8 +795,8 @@ impl ParallelSyncer {
                         fs::remove_file(&path)
                             .with_context(|| format!("Failed to delete source file after move: {}", path.display()))?;
                         
-                        if options.verbose {
-                            if let Ok(mut log) = logger.lock() {
+                        if options.verbose >= 2 {
+                            if let Ok(log) = logger.lock() {
                                 log.log(&format!("    Moved File      {:>12}  {} -> {}", file_size, path.display(), dest_path.display()));
                             }
                         }
@@ -696,7 +821,16 @@ impl ParallelSyncer {
                 let metadata = fs::symlink_metadata(&path)
                     .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
                 
-                // Verbose output already shown in operation listing, don't duplicate here
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
+                        if metadata.is_file() {
+                            let file_size = metadata.len();
+                            log.log(&format!("    Deleting File   {:>12}  {}", file_size, path.display()));
+                        } else {
+                            log.log(&format!("    Deleting Dir                 {}", path.display()));
+                        }
+                    }
+                }
                 
                 if metadata.is_symlink() || metadata.is_file() {
                     fs::remove_file(&path)
@@ -719,8 +853,8 @@ impl ParallelSyncer {
                     fs::create_dir_all(parent)?;
                 }
                 
-                if options.verbose {
-                    if let Ok(mut log) = logger.lock() {
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
                         log.log(&format!("    New Symlink                  {} -> {}", dest_path.display(), target.display()));
                     }
                 }
@@ -737,8 +871,8 @@ impl ParallelSyncer {
             FileOperation::UpdateSymlink { path, target } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
                 
-                if options.verbose {
-                    if let Ok(mut log) = logger.lock() {
+                if options.verbose >= 2 {
+                    if let Ok(log) = logger.lock() {
                         log.log(&format!("    Update Symlink               {} -> {}", dest_path.display(), target.display()));
                     }
                 }

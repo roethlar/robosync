@@ -26,16 +26,33 @@ pub fn synchronize(
             .with_context(|| format!("Failed to create destination directory: {}", destination.display()))?;
     }
     
-    if source.is_file() && destination.is_dir() {
+    // Use symlink_metadata to handle symlinks properly
+    let source_metadata = fs::symlink_metadata(&source)
+        .with_context(|| format!("Failed to get source metadata: {}", source.display()))?;
+    
+    if source_metadata.is_symlink() {
+        // Handle symlink copying
+        let target = fs::read_link(&source)
+            .with_context(|| format!("Failed to read symlink target: {}", source.display()))?;
+        
+        if destination.is_dir() {
+            let file_name = source.file_name()
+                .ok_or_else(|| anyhow::anyhow!("Source symlink has no name"))?;
+            let dest_file = destination.join(file_name);
+            create_symlink(&target, &dest_file)?;
+        } else {
+            create_symlink(&target, &destination)?;
+        }
+    } else if source_metadata.is_file() && destination.is_dir() {
         // Single file to directory
         let file_name = source.file_name()
             .ok_or_else(|| anyhow::anyhow!("Source file has no name"))?;
         let dest_file = destination.join(file_name);
         sync_single_file(&source, &dest_file)?;
-    } else if source.is_file() && (!destination.exists() || destination.is_file()) {
+    } else if source_metadata.is_file() && (!destination.exists() || destination.is_file()) {
         // Single file to file (new file or existing file)
         sync_single_file(&source, &destination)?;
-    } else if source.is_dir() {
+    } else if source_metadata.is_dir() {
         // Directory synchronization
         sync_directories(&source, &destination)?;
     } else {
@@ -164,8 +181,10 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
         Vec::new()
     };
     
-    // Compare file lists to determine operations
-    let operations = compare_file_lists_with_roots(&source_files, &dest_files, source, destination);
+    // Compare file lists to determine operations  
+    // Use default options for basic sync (no checksum comparison)
+    let default_options = crate::options::SyncOptions::default();
+    let operations = compare_file_lists_with_roots(&source_files, &dest_files, source, destination, &default_options);
     
     let total_files = operations.len() as u64;
     let total_bytes: u64 = source_files.iter()
@@ -208,13 +227,83 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                 progress.update_file_complete(file_size);
             }
             FileOperation::Delete { path } => {
-                if path.is_file() {
+                // Use symlink_metadata to check if it's a symlink without following it
+                let metadata = fs::symlink_metadata(&path)
+                    .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
+                
+                if metadata.is_symlink() {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("Failed to delete symlink: {}", path.display()))?;
+                } else if metadata.is_file() {
                     fs::remove_file(&path)
                         .with_context(|| format!("Failed to delete file: {}", path.display()))?;
-                } else if path.is_dir() {
+                } else if metadata.is_dir() {
                     fs::remove_dir_all(&path)
                         .with_context(|| format!("Failed to delete directory: {}", path.display()))?;
                 }
+                progress.update_file_complete(0);
+            }
+            FileOperation::CreateSymlink { path, target } => {
+                let dest_path = map_source_to_dest(&path, source, destination)?;
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &dest_path)
+                    .with_context(|| format!("Failed to create symlink: {} -> {}", dest_path.display(), target.display()))?;
+                
+                #[cfg(windows)]
+                {
+                    // On Windows, we need to check if the target is a directory or file
+                    // to use the appropriate symlink function
+                    let target_path = if target.is_absolute() {
+                        target.clone()
+                    } else {
+                        path.parent().unwrap_or(Path::new(".")).join(&target)
+                    };
+                    
+                    if target_path.is_dir() {
+                        std::os::windows::fs::symlink_dir(&target, &dest_path)
+                            .with_context(|| format!("Failed to create directory symlink: {} -> {}", dest_path.display(), target.display()))?;
+                    } else {
+                        std::os::windows::fs::symlink_file(&target, &dest_path)
+                            .with_context(|| format!("Failed to create file symlink: {} -> {}", dest_path.display(), target.display()))?;
+                    }
+                }
+                
+                progress.update_file_complete(0);
+            }
+            FileOperation::UpdateSymlink { path, target } => {
+                let dest_path = map_source_to_dest(&path, source, destination)?;
+                
+                // Remove existing symlink
+                fs::remove_file(&dest_path)
+                    .with_context(|| format!("Failed to remove existing symlink: {}", dest_path.display()))?;
+                
+                // Create new symlink
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &dest_path)
+                    .with_context(|| format!("Failed to update symlink: {} -> {}", dest_path.display(), target.display()))?;
+                
+                #[cfg(windows)]
+                {
+                    // On Windows, we need to check if the target is a directory or file
+                    let target_path = if target.is_absolute() {
+                        target.clone()
+                    } else {
+                        path.parent().unwrap_or(Path::new(".")).join(&target)
+                    };
+                    
+                    if target_path.is_dir() {
+                        std::os::windows::fs::symlink_dir(&target, &dest_path)
+                            .with_context(|| format!("Failed to update directory symlink: {} -> {}", dest_path.display(), target.display()))?;
+                    } else {
+                        std::os::windows::fs::symlink_file(&target, &dest_path)
+                            .with_context(|| format!("Failed to update file symlink: {} -> {}", dest_path.display(), target.display()))?;
+                    }
+                }
+                
                 progress.update_file_complete(0);
             }
         }
@@ -229,6 +318,44 @@ fn map_source_to_dest(source_file: &Path, source_root: &Path, dest_root: &Path) 
     let relative = source_file.strip_prefix(source_root)
         .with_context(|| format!("File {} is not under source root {}", source_file.display(), source_root.display()))?;
     Ok(dest_root.join(relative))
+}
+
+/// Create a symlink at the destination pointing to the target
+fn create_symlink(target: &Path, destination: &Path) -> Result<()> {
+    println!("Creating symlink: {} -> {}", destination.display(), target.display());
+    
+    // Create parent directories if needed
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+    }
+    
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, destination)
+        .with_context(|| format!("Failed to create symlink: {} -> {}", destination.display(), target.display()))?;
+    
+    #[cfg(windows)]
+    {
+        // On Windows, we need to determine if the target is a directory or file
+        // For relative paths, we need to resolve them relative to the symlink location
+        let target_path = if target.is_absolute() {
+            target.to_path_buf()
+        } else if let Some(parent) = destination.parent() {
+            parent.join(target)
+        } else {
+            target.to_path_buf()
+        };
+        
+        if target_path.is_dir() {
+            std::os::windows::fs::symlink_dir(target, destination)
+                .with_context(|| format!("Failed to create directory symlink: {} -> {}", destination.display(), target.display()))?;
+        } else {
+            std::os::windows::fs::symlink_file(target, destination)
+                .with_context(|| format!("Failed to create file symlink: {} -> {}", destination.display(), target.display()))?;
+        }
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]
@@ -258,7 +385,7 @@ mod tests {
         let dest_data = b"Hello, World!";
         let matches = vec![
             Match::Block { source_offset: 0, target_offset: 0, length: 5 }, // "Hello"
-            Match::Literal { offset: 5, data: b" Rust".to_vec() }, // " Rust"
+            Match::Literal { offset: 5, data: b" Rust".to_vec(), is_compressed: false }, // " Rust"
             Match::Block { source_offset: 10, target_offset: 5, length: 8 }, // ", World!"
         ];
         

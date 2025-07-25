@@ -1,6 +1,6 @@
 [package]
 name = "robosync"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["RoboSync Contributors"]
 description = "Fast, parallel file synchronization with delta-transfer and RoboCopy interface"
@@ -35,7 +35,8 @@ crossbeam = "0.8"
 rayon = "1.8"
 
 # Progress reporting
-indicatif = "0.17"
+indicatif = "0.18.0"
+atty = "0.2"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -64,7 +65,6 @@ strip = true
 [profile.dev]
 opt-level = 1
 
-# Benchmarks will be added later
-# [[bench]]
-# name = "benchmarks" 
-# harness = false
+[[bench]]
+name = "performance"
+harness = false
