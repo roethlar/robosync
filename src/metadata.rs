@@ -138,8 +138,7 @@ fn copy_file_with_metadata_internal(
 pub fn copy_symlink_with_metadata(
     source: &Path,
     destination: &Path,
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    flags: &CopyFlags,
+    #[cfg_attr(not(unix), allow(unused_variables))] flags: &CopyFlags,
 ) -> Result<u64> {
     // Read the symlink target
     let target = fs::read_link(source)
