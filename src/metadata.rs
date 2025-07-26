@@ -138,7 +138,7 @@ fn copy_file_with_metadata_internal(
 pub fn copy_symlink_with_metadata(
     source: &Path,
     destination: &Path,
-    _flags: &CopyFlags,
+    flags: &CopyFlags,
 ) -> Result<u64> {
     // Read the symlink target
     let target = fs::read_link(source)
@@ -148,7 +148,7 @@ pub fn copy_symlink_with_metadata(
     create_symlink_cross_platform(&target, destination)?;
 
     // Get source symlink metadata (using symlink_metadata to get info about the link itself)
-    let _source_metadata = fs::symlink_metadata(source).with_context(|| {
+    let source_metadata = fs::symlink_metadata(source).with_context(|| {
         format!(
             "Failed to read source symlink metadata: {}",
             source.display()
