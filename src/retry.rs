@@ -1,9 +1,9 @@
 //! Retry logic for handling transient failures
 
-use anyhow::{Result, Context};
-use std::time::Duration;
-use std::thread;
 use crate::logging::SyncLogger;
+use anyhow::{Context, Result};
+use std::thread;
+use std::time::Duration;
 
 /// Retry configuration
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ impl RetryConfig {
             wait_seconds,
         }
     }
-    
+
     pub fn should_retry(&self) -> bool {
         self.max_retries > 0
     }
@@ -38,20 +38,22 @@ where
     F: Fn() -> Result<T>,
 {
     let mut last_error = None;
-    
+
     for attempt in 0..=config.max_retries {
         match operation() {
             Ok(result) => {
                 if attempt > 0 {
                     if let Some(ref mut log) = logger {
-                        log.log(&format!("    {description} succeeded after {attempt} retries"));
+                        log.log(&format!(
+                            "    {description} succeeded after {attempt} retries"
+                        ));
                     }
                 }
                 return Ok(result);
             }
             Err(e) => {
                 last_error = Some(e);
-                
+
                 if attempt < config.max_retries {
                     if let Some(ref mut log) = logger {
                         log.log(&format!(
@@ -63,48 +65,55 @@ where
                             config.wait_seconds
                         ));
                     }
-                    
+
                     thread::sleep(Duration::from_secs(config.wait_seconds as u64));
                 }
             }
         }
     }
-    
+
     // All retries exhausted
-    Err(last_error.unwrap())
-        .with_context(|| format!("{} failed after {} retries", description, config.max_retries))
+    Err(last_error.unwrap()).with_context(|| {
+        format!(
+            "{} failed after {} retries",
+            description, config.max_retries
+        )
+    })
 }
 
 /// Check if an error is retryable
 pub fn is_retryable_error(error: &anyhow::Error) -> bool {
     // Check the error chain for specific error types
     let error_string = error.to_string().to_lowercase();
-    
+
     // File system errors that are typically transient
-    if error_string.contains("permission denied") ||
-       error_string.contains("access is denied") ||
-       error_string.contains("sharing violation") ||
-       error_string.contains("resource temporarily unavailable") ||
-       error_string.contains("too many open files") ||
-       error_string.contains("device or resource busy") {
+    if error_string.contains("permission denied")
+        || error_string.contains("access is denied")
+        || error_string.contains("sharing violation")
+        || error_string.contains("resource temporarily unavailable")
+        || error_string.contains("too many open files")
+        || error_string.contains("device or resource busy")
+    {
         return true;
     }
-    
+
     // Network errors (for future remote sync support)
-    if error_string.contains("connection refused") ||
-       error_string.contains("connection reset") ||
-       error_string.contains("timeout") ||
-       error_string.contains("network unreachable") {
+    if error_string.contains("connection refused")
+        || error_string.contains("connection reset")
+        || error_string.contains("timeout")
+        || error_string.contains("network unreachable")
+    {
         return true;
     }
-    
+
     // Check if it's an I/O error
     if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-        matches!(io_error.kind(), 
-            std::io::ErrorKind::PermissionDenied |
-            std::io::ErrorKind::WouldBlock |
-            std::io::ErrorKind::TimedOut |
-            std::io::ErrorKind::Interrupted
+        matches!(
+            io_error.kind(),
+            std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
         )
     } else {
         false
@@ -115,24 +124,19 @@ pub fn is_retryable_error(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    
+
     #[test]
     fn test_retry_success_first_attempt() {
         let config = RetryConfig::new(3, 1);
-        let result = with_retry(
-            || Ok(42),
-            &config,
-            "test operation",
-            None,
-        );
+        let result = with_retry(|| Ok(42), &config, "test operation", None);
         assert_eq!(result.unwrap(), 42);
     }
-    
+
     #[test]
     fn test_retry_success_after_failures() {
         let config = RetryConfig::new(3, 0); // 0 second wait for tests
         let attempt_count = AtomicU32::new(0);
-        
+
         let result = with_retry(
             || {
                 let count = attempt_count.fetch_add(1, Ordering::SeqCst);
@@ -146,11 +150,11 @@ mod tests {
             "test operation",
             None,
         );
-        
+
         assert_eq!(result.unwrap(), 42);
         assert_eq!(attempt_count.load(Ordering::SeqCst), 3);
     }
-    
+
     #[test]
     fn test_retry_all_failures() {
         let config = RetryConfig::new(2, 0); // 0 second wait for tests
@@ -160,18 +164,23 @@ mod tests {
             "test operation",
             None,
         );
-        
+
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed after 2 retries"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed after 2 retries"));
     }
-    
+
     #[test]
     fn test_is_retryable_error() {
         // Retryable errors
         assert!(is_retryable_error(&anyhow::anyhow!("Permission denied")));
         assert!(is_retryable_error(&anyhow::anyhow!("Access is denied")));
-        assert!(is_retryable_error(&anyhow::anyhow!("Resource temporarily unavailable")));
-        
+        assert!(is_retryable_error(&anyhow::anyhow!(
+            "Resource temporarily unavailable"
+        )));
+
         // Non-retryable errors
         assert!(!is_retryable_error(&anyhow::anyhow!("File not found")));
         assert!(!is_retryable_error(&anyhow::anyhow!("Invalid argument")));

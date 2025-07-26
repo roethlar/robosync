@@ -9,7 +9,7 @@ pub struct SyncOptions {
     pub purge: bool,
     pub mirror: bool,
     pub dry_run: bool,
-    pub verbose: u8,  // 0 = quiet, 1 = -v, 2 = -vv
+    pub verbose: u8, // 0 = quiet, 1 = -v, 2 = -vv
     pub confirm: bool,
     pub no_progress: bool,
     pub move_files: bool,

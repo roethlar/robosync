@@ -43,7 +43,7 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Run clippy
-      run: cargo clippy -- -W clippy::all -D clippy::correctness -D clippy::suspicious
+      run: cargo clippy -- -D warnings
 
   format:
     name: Format

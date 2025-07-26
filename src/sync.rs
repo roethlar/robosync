@@ -1,41 +1,46 @@
 //! Main synchronization logic
 
-use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::algorithm::{DeltaAlgorithm, Match};
-use crate::file_list::{generate_file_list, FileOperation, compare_file_lists_with_roots};
-use crate::progress::SyncProgress;
+use crate::file_list::{compare_file_lists_with_roots, generate_file_list, FileOperation};
 use crate::options::SyncOptions;
+use crate::progress::SyncProgress;
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Synchronize files from source to destination
 pub fn synchronize(
     source: PathBuf,
-    destination: PathBuf, 
+    destination: PathBuf,
     _threads: usize,
     _compress: bool,
 ) -> Result<()> {
     println!("Starting synchronization...");
     println!("  Source: {}", source.display());
     println!("  Destination: {}", destination.display());
-    
+
     // Create destination if it doesn't exist
     if !destination.exists() {
-        fs::create_dir_all(&destination)
-            .with_context(|| format!("Failed to create destination directory: {}", destination.display()))?;
+        fs::create_dir_all(&destination).with_context(|| {
+            format!(
+                "Failed to create destination directory: {}",
+                destination.display()
+            )
+        })?;
     }
-    
+
     // Use symlink_metadata to handle symlinks properly
     let source_metadata = fs::symlink_metadata(&source)
         .with_context(|| format!("Failed to get source metadata: {}", source.display()))?;
-    
+
     if source_metadata.is_symlink() {
         // Handle symlink copying
         let target = fs::read_link(&source)
             .with_context(|| format!("Failed to read symlink target: {}", source.display()))?;
-        
+
         if destination.is_dir() {
-            let file_name = source.file_name()
+            let file_name = source
+                .file_name()
                 .ok_or_else(|| anyhow::anyhow!("Source symlink has no name"))?;
             let dest_file = destination.join(file_name);
             create_symlink(&target, &dest_file)?;
@@ -44,7 +49,8 @@ pub fn synchronize(
         }
     } else if source_metadata.is_file() && destination.is_dir() {
         // Single file to directory
-        let file_name = source.file_name()
+        let file_name = source
+            .file_name()
             .ok_or_else(|| anyhow::anyhow!("Source file has no name"))?;
         let dest_file = destination.join(file_name);
         sync_single_file(&source, &dest_file)?;
@@ -57,7 +63,7 @@ pub fn synchronize(
     } else {
         return Err(anyhow::anyhow!("Invalid source/destination combination"));
     }
-    
+
     println!("Synchronization completed successfully!");
     Ok(())
 }
@@ -75,7 +81,7 @@ pub fn synchronize_with_options(
         println!("  Destination: {}", destination.display());
         return Ok(());
     }
-    
+
     // For now, just call the basic synchronize function
     // TODO: Implement full options support
     synchronize(source, destination, _threads, options.compress)
@@ -83,122 +89,151 @@ pub fn synchronize_with_options(
 
 /// Synchronize a single file using delta algorithm
 fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
-    println!("Syncing file: {} -> {}", source.display(), destination.display());
-    
+    println!(
+        "Syncing file: {} -> {}",
+        source.display(),
+        destination.display()
+    );
+
     let source_data = fs::read(source)
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-    
+
     if !destination.exists() {
         // Destination doesn't exist, just copy the file
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
         }
-        
-        fs::write(destination, &source_data)
-            .with_context(|| format!("Failed to write destination file: {}", destination.display()))?;
-        
+
+        fs::write(destination, &source_data).with_context(|| {
+            format!(
+                "Failed to write destination file: {}",
+                destination.display()
+            )
+        })?;
+
         println!("  Copied {} bytes (new file)", source_data.len());
         return Ok(());
     }
-    
+
     // Destination exists, use delta algorithm
     let dest_data = fs::read(destination)
         .with_context(|| format!("Failed to read destination file: {}", destination.display()))?;
-    
+
     let algorithm = DeltaAlgorithm::default();
-    
+
     // Generate checksums for destination (target) blocks
-    let checksums = algorithm.generate_checksums(&dest_data)
+    let checksums = algorithm
+        .generate_checksums(&dest_data)
         .context("Failed to generate checksums for destination")?;
-    
+
     // Find matches between source and destination
-    let matches = algorithm.find_matches(&source_data, &checksums)
+    let matches = algorithm
+        .find_matches(&source_data, &checksums)
         .context("Failed to find matches")?;
-    
+
     // Apply the delta to reconstruct the file
     let new_data = apply_delta(&dest_data, &matches)?;
-    
+
     // Write the updated file
     fs::write(destination, &new_data)
         .with_context(|| format!("Failed to write updated file: {}", destination.display()))?;
-    
+
     // Calculate transfer statistics
-    let literal_bytes: usize = matches.iter()
+    let literal_bytes: usize = matches
+        .iter()
         .filter_map(|m| match m {
             Match::Literal { data, .. } => Some(data.len()),
             _ => None,
         })
         .sum();
-    
-    let block_matches = matches.iter()
+
+    let block_matches = matches
+        .iter()
         .filter(|m| matches!(m, Match::Block { .. }))
         .count();
-    
+
     println!("  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)");
-    
+
     Ok(())
 }
 
 /// Apply delta matches to reconstruct a file
 fn apply_delta(dest_data: &[u8], matches: &[Match]) -> Result<Vec<u8>> {
     let mut result = Vec::new();
-    
+
     for match_item in matches {
         match match_item {
             Match::Literal { data, .. } => {
                 result.extend_from_slice(data);
             }
-            Match::Block { target_offset, length, .. } => {
+            Match::Block {
+                target_offset,
+                length,
+                ..
+            } => {
                 let start = *target_offset as usize;
                 let end = start + length;
                 if end <= dest_data.len() {
                     result.extend_from_slice(&dest_data[start..end]);
                 } else {
-                    return Err(anyhow::anyhow!("Block match extends beyond destination data"));
+                    return Err(anyhow::anyhow!(
+                        "Block match extends beyond destination data"
+                    ));
                 }
             }
         }
     }
-    
+
     Ok(result)
 }
 
 /// Synchronize directories recursively
 fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
-    println!("Syncing directory: {} -> {}", source.display(), destination.display());
-    
+    println!(
+        "Syncing directory: {} -> {}",
+        source.display(),
+        destination.display()
+    );
+
     // Generate file lists
-    let source_files = generate_file_list(source)
-        .context("Failed to generate source file list")?;
-    
+    let source_files = generate_file_list(source).context("Failed to generate source file list")?;
+
     let dest_files = if destination.exists() {
-        generate_file_list(destination)
-            .context("Failed to generate destination file list")?
+        generate_file_list(destination).context("Failed to generate destination file list")?
     } else {
         Vec::new()
     };
-    
-    // Compare file lists to determine operations  
+
+    // Compare file lists to determine operations
     // Use default options for basic sync (no checksum comparison)
     let default_options = crate::options::SyncOptions::default();
-    let operations = compare_file_lists_with_roots(&source_files, &dest_files, source, destination, &default_options);
-    
+    let operations = compare_file_lists_with_roots(
+        &source_files,
+        &dest_files,
+        source,
+        destination,
+        &default_options,
+    );
+
     let total_files = operations.len() as u64;
-    let total_bytes: u64 = source_files.iter()
+    let total_bytes: u64 = source_files
+        .iter()
         .filter(|f| !f.is_directory)
         .map(|f| f.size)
         .sum();
-    
+
     let mut progress = SyncProgress::new(total_files, total_bytes);
-    
+
     // Execute operations
     for operation in operations {
         match operation {
             FileOperation::CreateDirectory { path } => {
                 let dest_path = map_source_to_dest(&path, source, destination)?;
-                fs::create_dir_all(&dest_path)
-                    .with_context(|| format!("Failed to create directory: {}", dest_path.display()))?;
+                fs::create_dir_all(&dest_path).with_context(|| {
+                    format!("Failed to create directory: {}", dest_path.display())
+                })?;
                 progress.update_file_complete(0);
             }
             FileOperation::Create { path } => {
@@ -207,28 +242,44 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                     fs::create_dir_all(parent)?;
                 }
                 let file_size = fs::metadata(&path)?.len();
-                fs::copy(&path, &dest_path)
-                    .with_context(|| format!("Failed to copy file: {} -> {}", path.display(), dest_path.display()))?;
+                fs::copy(&path, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to copy file: {} -> {}",
+                        path.display(),
+                        dest_path.display()
+                    )
+                })?;
                 progress.update_file_complete(file_size);
             }
-            FileOperation::Update { path, use_delta: true } => {
+            FileOperation::Update {
+                path,
+                use_delta: true,
+            } => {
                 let dest_path = map_source_to_dest(&path, source, destination)?;
                 sync_single_file(&path, &dest_path)?;
                 let file_size = fs::metadata(&path)?.len();
                 progress.update_file_complete(file_size);
             }
-            FileOperation::Update { path, use_delta: false } => {
+            FileOperation::Update {
+                path,
+                use_delta: false,
+            } => {
                 let dest_path = map_source_to_dest(&path, source, destination)?;
                 let file_size = fs::metadata(&path)?.len();
-                fs::copy(&path, &dest_path)
-                    .with_context(|| format!("Failed to copy file: {} -> {}", path.display(), dest_path.display()))?;
+                fs::copy(&path, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to copy file: {} -> {}",
+                        path.display(),
+                        dest_path.display()
+                    )
+                })?;
                 progress.update_file_complete(file_size);
             }
             FileOperation::Delete { path } => {
                 // Use symlink_metadata to check if it's a symlink without following it
                 let metadata = fs::symlink_metadata(&path)
                     .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
-                
+
                 if metadata.is_symlink() {
                     fs::remove_file(&path)
                         .with_context(|| format!("Failed to delete symlink: {}", path.display()))?;
@@ -236,8 +287,9 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                     fs::remove_file(&path)
                         .with_context(|| format!("Failed to delete file: {}", path.display()))?;
                 } else if metadata.is_dir() {
-                    fs::remove_dir_all(&path)
-                        .with_context(|| format!("Failed to delete directory: {}", path.display()))?;
+                    fs::remove_dir_all(&path).with_context(|| {
+                        format!("Failed to delete directory: {}", path.display())
+                    })?;
                 }
                 progress.update_file_complete(0);
             }
@@ -246,11 +298,16 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                 if let Some(parent) = dest_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                
+
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &dest_path)
-                    .with_context(|| format!("Failed to create symlink: {} -> {}", dest_path.display(), target.display()))?;
-                
+                std::os::unix::fs::symlink(&target, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to create symlink: {} -> {}",
+                        dest_path.display(),
+                        target.display()
+                    )
+                })?;
+
                 #[cfg(windows)]
                 {
                     // On Windows, we need to check if the target is a directory or file
@@ -260,30 +317,50 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                     } else {
                         path.parent().unwrap_or(Path::new(".")).join(&target)
                     };
-                    
+
                     if target_path.is_dir() {
-                        std::os::windows::fs::symlink_dir(&target, &dest_path)
-                            .with_context(|| format!("Failed to create directory symlink: {} -> {}", dest_path.display(), target.display()))?;
+                        std::os::windows::fs::symlink_dir(&target, &dest_path).with_context(
+                            || {
+                                format!(
+                                    "Failed to create directory symlink: {} -> {}",
+                                    dest_path.display(),
+                                    target.display()
+                                )
+                            },
+                        )?;
                     } else {
-                        std::os::windows::fs::symlink_file(&target, &dest_path)
-                            .with_context(|| format!("Failed to create file symlink: {} -> {}", dest_path.display(), target.display()))?;
+                        std::os::windows::fs::symlink_file(&target, &dest_path).with_context(
+                            || {
+                                format!(
+                                    "Failed to create file symlink: {} -> {}",
+                                    dest_path.display(),
+                                    target.display()
+                                )
+                            },
+                        )?;
                     }
                 }
-                
+
                 progress.update_file_complete(0);
             }
             FileOperation::UpdateSymlink { path, target } => {
                 let dest_path = map_source_to_dest(&path, source, destination)?;
-                
+
                 // Remove existing symlink
-                fs::remove_file(&dest_path)
-                    .with_context(|| format!("Failed to remove existing symlink: {}", dest_path.display()))?;
-                
+                fs::remove_file(&dest_path).with_context(|| {
+                    format!("Failed to remove existing symlink: {}", dest_path.display())
+                })?;
+
                 // Create new symlink
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &dest_path)
-                    .with_context(|| format!("Failed to update symlink: {} -> {}", dest_path.display(), target.display()))?;
-                
+                std::os::unix::fs::symlink(&target, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to update symlink: {} -> {}",
+                        dest_path.display(),
+                        target.display()
+                    )
+                })?;
+
                 #[cfg(windows)]
                 {
                     // On Windows, we need to check if the target is a directory or file
@@ -292,46 +369,74 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
                     } else {
                         path.parent().unwrap_or(Path::new(".")).join(&target)
                     };
-                    
+
                     if target_path.is_dir() {
-                        std::os::windows::fs::symlink_dir(&target, &dest_path)
-                            .with_context(|| format!("Failed to update directory symlink: {} -> {}", dest_path.display(), target.display()))?;
+                        std::os::windows::fs::symlink_dir(&target, &dest_path).with_context(
+                            || {
+                                format!(
+                                    "Failed to update directory symlink: {} -> {}",
+                                    dest_path.display(),
+                                    target.display()
+                                )
+                            },
+                        )?;
                     } else {
-                        std::os::windows::fs::symlink_file(&target, &dest_path)
-                            .with_context(|| format!("Failed to update file symlink: {} -> {}", dest_path.display(), target.display()))?;
+                        std::os::windows::fs::symlink_file(&target, &dest_path).with_context(
+                            || {
+                                format!(
+                                    "Failed to update file symlink: {} -> {}",
+                                    dest_path.display(),
+                                    target.display()
+                                )
+                            },
+                        )?;
                     }
                 }
-                
+
                 progress.update_file_complete(0);
             }
         }
     }
-    
+
     progress.finish();
     Ok(())
 }
 
 /// Map a source path to the corresponding destination path
 fn map_source_to_dest(source_file: &Path, source_root: &Path, dest_root: &Path) -> Result<PathBuf> {
-    let relative = source_file.strip_prefix(source_root)
-        .with_context(|| format!("File {} is not under source root {}", source_file.display(), source_root.display()))?;
+    let relative = source_file.strip_prefix(source_root).with_context(|| {
+        format!(
+            "File {} is not under source root {}",
+            source_file.display(),
+            source_root.display()
+        )
+    })?;
     Ok(dest_root.join(relative))
 }
 
 /// Create a symlink at the destination pointing to the target
 fn create_symlink(target: &Path, destination: &Path) -> Result<()> {
-    println!("Creating symlink: {} -> {}", destination.display(), target.display());
-    
+    println!(
+        "Creating symlink: {} -> {}",
+        destination.display(),
+        target.display()
+    );
+
     // Create parent directories if needed
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
     }
-    
+
     #[cfg(unix)]
-    std::os::unix::fs::symlink(target, destination)
-        .with_context(|| format!("Failed to create symlink: {} -> {}", destination.display(), target.display()))?;
-    
+    std::os::unix::fs::symlink(target, destination).with_context(|| {
+        format!(
+            "Failed to create symlink: {} -> {}",
+            destination.display(),
+            target.display()
+        )
+    })?;
+
     #[cfg(windows)]
     {
         // On Windows, we need to determine if the target is a directory or file
@@ -343,38 +448,48 @@ fn create_symlink(target: &Path, destination: &Path) -> Result<()> {
         } else {
             target.to_path_buf()
         };
-        
+
         if target_path.is_dir() {
-            std::os::windows::fs::symlink_dir(target, destination)
-                .with_context(|| format!("Failed to create directory symlink: {} -> {}", destination.display(), target.display()))?;
+            std::os::windows::fs::symlink_dir(target, destination).with_context(|| {
+                format!(
+                    "Failed to create directory symlink: {} -> {}",
+                    destination.display(),
+                    target.display()
+                )
+            })?;
         } else {
-            std::os::windows::fs::symlink_file(target, destination)
-                .with_context(|| format!("Failed to create file symlink: {} -> {}", destination.display(), target.display()))?;
+            std::os::windows::fs::symlink_file(target, destination).with_context(|| {
+                format!(
+                    "Failed to create file symlink: {} -> {}",
+                    destination.display(),
+                    target.display()
+                )
+            })?;
         }
     }
-    
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_sync_single_file_new() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let source = temp_dir.path().join("source.txt");
         let dest = temp_dir.path().join("dest.txt");
-        
+
         fs::write(&source, b"Hello, World!")?;
-        
+
         sync_single_file(&source, &dest)?;
-        
+
         let dest_content = fs::read(&dest)?;
         assert_eq!(dest_content, b"Hello, World!");
-        
+
         Ok(())
     }
 
@@ -382,14 +497,26 @@ mod tests {
     fn test_apply_delta() -> Result<()> {
         let dest_data = b"Hello, World!";
         let matches = vec![
-            Match::Block { source_offset: 0, target_offset: 0, length: 5 }, // "Hello"
-            Match::Literal { offset: 5, data: b" Rust".to_vec(), is_compressed: false }, // " Rust"
-            Match::Block { source_offset: 10, target_offset: 5, length: 8 }, // ", World!"
+            Match::Block {
+                source_offset: 0,
+                target_offset: 0,
+                length: 5,
+            }, // "Hello"
+            Match::Literal {
+                offset: 5,
+                data: b" Rust".to_vec(),
+                is_compressed: false,
+            }, // " Rust"
+            Match::Block {
+                source_offset: 10,
+                target_offset: 5,
+                length: 8,
+            }, // ", World!"
         ];
-        
+
         let result = apply_delta(dest_data, &matches)?;
         assert_eq!(result, b"Hello Rust, World!");
-        
+
         Ok(())
     }
 }

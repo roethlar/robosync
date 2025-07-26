@@ -35,39 +35,41 @@ impl RollingChecksum {
             block_size,
         }
     }
-    
+
     /// Initialize checksum for a block of data (rsync-compatible)
     pub fn init(&mut self, data: &[u8]) {
         self.s1 = 0;
         self.s2 = 0;
-        
+
         // Use rsync's algorithm: process 4 bytes at a time for speed
         let len = data.len();
         let mut i = 0;
-        
+
         // Process 4 bytes at a time (rsync optimization)
         while i + 4 <= len {
             let b0 = data[i] as u32;
             let b1 = data[i + 1] as u32;
             let b2 = data[i + 2] as u32;
             let b3 = data[i + 3] as u32;
-            
+
             self.s2 = self.s2.wrapping_add(
                 4u32.wrapping_mul(self.s1.wrapping_add(b0))
                     .wrapping_add(3u32.wrapping_mul(b1))
                     .wrapping_add(2u32.wrapping_mul(b2))
                     .wrapping_add(b3)
-                    .wrapping_add(10u32.wrapping_mul(CHAR_OFFSET))
+                    .wrapping_add(10u32.wrapping_mul(CHAR_OFFSET)),
             );
-            
+
             self.s1 = self.s1.wrapping_add(
-                b0.wrapping_add(b1).wrapping_add(b2).wrapping_add(b3)
-                    .wrapping_add(4u32.wrapping_mul(CHAR_OFFSET))
+                b0.wrapping_add(b1)
+                    .wrapping_add(b2)
+                    .wrapping_add(b3)
+                    .wrapping_add(4u32.wrapping_mul(CHAR_OFFSET)),
             );
-            
+
             i += 4;
         }
-        
+
         // Process remaining bytes
         while i < len {
             let byte = data[i] as u32;
@@ -76,28 +78,29 @@ impl RollingChecksum {
             i += 1;
         }
     }
-    
+
     /// Roll the checksum by removing old byte and adding new byte
     pub fn roll(&mut self, old_byte: u8, new_byte: u8) {
         let old = old_byte as u32 + CHAR_OFFSET;
         let new = new_byte as u32 + CHAR_OFFSET;
-        
+
         self.s1 = self.s1.wrapping_sub(old).wrapping_add(new);
-        self.s2 = self.s2
+        self.s2 = self
+            .s2
             .wrapping_sub(self.block_size as u32 * old)
             .wrapping_add(self.s1);
     }
-    
+
     /// Get current checksum value (rsync format: s1 in lower 16 bits, s2 in upper 16 bits)
     pub fn value(&self) -> u32 {
         (self.s1 & 0xFFFF) | (self.s2 << 16)
     }
-    
+
     /// Get s1 component
     pub fn s1(&self) -> u32 {
         self.s1
     }
-    
+
     /// Get s2 component  
     pub fn s2(&self) -> u32 {
         self.s2
@@ -123,7 +126,7 @@ pub fn strong_checksum(data: &[u8], checksum_type: ChecksumType) -> Result<Vec<u
             Ok(hash.to_le_bytes().to_vec())
         }
         ChecksumType::Md5 => {
-            use md5::{Md5, Digest};
+            use md5::{Digest, Md5};
             let mut hasher = Md5::new();
             hasher.update(data);
             Ok(hasher.finalize().to_vec())
@@ -139,7 +142,7 @@ mod tests {
     fn test_rolling_checksum_basic() {
         let data = b"Hello, World!";
         let checksum = get_checksum1(data);
-        
+
         // Verify it produces a consistent result
         let checksum2 = get_checksum1(data);
         assert_eq!(checksum, checksum2);
@@ -149,18 +152,18 @@ mod tests {
     fn test_rolling_checksum_rolling() {
         let data = b"abcdef";
         let mut rolling = RollingChecksum::new(3);
-        
+
         // Initialize with first 3 bytes: "abc"
         rolling.init(&data[0..3]);
         let initial = rolling.value();
-        
+
         // Roll to next position: remove 'a', add 'd' -> "bcd"
         rolling.roll(data[0], data[3]);
         let rolled = rolling.value();
-        
+
         // Should be different
         assert_ne!(initial, rolled);
-        
+
         // Verify by computing fresh checksum for "bcd"
         let fresh = get_checksum1(&data[1..4]);
         assert_eq!(rolled, fresh);

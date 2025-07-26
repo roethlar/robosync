@@ -4,19 +4,19 @@ use std::path::PathBuf;
 
 mod algorithm;
 mod checksum;
-mod file_list;
-mod progress;
-mod options;
-mod metadata;
-mod logging;
 mod compression;
+mod file_list;
+mod logging;
+mod metadata;
+mod options;
+mod parallel_sync;
+mod progress;
 mod retry;
 mod sync;
-mod parallel_sync;
 
-use parallel_sync::{ParallelSyncer, ParallelSyncConfig};
-use options::SyncOptions;
 use compression::CompressionConfig;
+use options::SyncOptions;
+use parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 
 /// Get the maximum safe thread count based on OS file handle limits
 fn get_max_thread_count() -> usize {
@@ -35,13 +35,9 @@ fn get_max_thread_count() -> usize {
     {
         // Linux can handle more, check the actual limit
         use std::process::Command;
-        
+
         // Try to get the soft limit for file descriptors
-        if let Ok(output) = Command::new("sh")
-            .arg("-c")
-            .arg("ulimit -n")
-            .output()
-        {
+        if let Ok(output) = Command::new("sh").arg("-c").arg("ulimit -n").output() {
             if let Ok(limit_str) = String::from_utf8(output.stdout) {
                 if let Ok(limit) = limit_str.trim().parse::<usize>() {
                     // Use 1/4 of the file descriptor limit as a safe maximum
@@ -58,12 +54,8 @@ fn get_max_thread_count() -> usize {
         // FreeBSD typically has good file descriptor limits
         // Check the actual limit similar to Linux
         use std::process::Command;
-        
-        if let Ok(output) = Command::new("sh")
-            .arg("-c")
-            .arg("ulimit -n")
-            .output()
-        {
+
+        if let Ok(output) = Command::new("sh").arg("-c").arg("ulimit -n").output() {
             if let Ok(limit_str) = String::from_utf8(output.stdout) {
                 if let Ok(limit) = limit_str.trim().parse::<usize>() {
                     return (limit / 4).clamp(64, 256);
@@ -93,8 +85,8 @@ fn get_max_thread_count() -> usize {
         256
     }
     #[cfg(not(any(
-        target_os = "macos", 
-        target_os = "windows", 
+        target_os = "macos",
+        target_os = "windows",
         target_os = "linux",
         target_os = "freebsd",
         target_os = "openbsd",
@@ -124,7 +116,7 @@ fn main() -> Result<()> {
                 .required(true)
                 .value_parser(clap::value_parser!(PathBuf))
         )
-        
+
         // Core copy options (RoboCopy style)
         .arg(
             Arg::new("subdirs")
@@ -165,7 +157,7 @@ fn main() -> Result<()> {
                 .help("Move files (delete source after successful copy). WARNING: If sync is interrupted and restarted, already moved files will be lost!")
                 .action(clap::ArgAction::SetTrue)
         )
-        
+
         // File filtering options
         .arg(
             Arg::new("exclude-files")
@@ -195,7 +187,7 @@ fn main() -> Result<()> {
                 .help("Maximum file size - exclude files bigger than SIZE bytes")
                 .value_parser(clap::value_parser!(u64))
         )
-        
+
         // Copy flags
         .arg(
             Arg::new("copy-flags")
@@ -210,7 +202,7 @@ fn main() -> Result<()> {
                 .help("Copy all file info including security/ownership (equivalent to --copy DATSOU)")
                 .action(clap::ArgAction::SetTrue)
         )
-        
+
         // Logging and verbosity
         .arg(
             Arg::new("verbose")
@@ -245,7 +237,7 @@ fn main() -> Result<()> {
                 .help("Show estimated time of arrival and progress updates")
                 .action(clap::ArgAction::SetTrue)
         )
-        
+
         // Retry options
         .arg(
             Arg::new("retry-count")
@@ -267,7 +259,7 @@ fn main() -> Result<()> {
                 .default_value("30")
                 .value_parser(clap::value_parser!(u32))
         )
-        
+
         // Performance options
         .arg(
             Arg::new("threads")
@@ -292,7 +284,7 @@ fn main() -> Result<()> {
                 .help("Force sequential processing (disables parallelism)")
                 .action(clap::ArgAction::SetTrue)
         )
-        
+
         // Legacy rsync options
         .arg(
             Arg::new("archive")
@@ -338,7 +330,7 @@ fn main() -> Result<()> {
 
     let source: PathBuf = matches.get_one::<PathBuf>("source").unwrap().clone();
     let destination: PathBuf = matches.get_one::<PathBuf>("destination").unwrap().clone();
-    
+
     // Parse options
     let compress = matches.get_flag("compress");
     let sequential = matches.get_flag("sequential");
@@ -349,7 +341,7 @@ fn main() -> Result<()> {
     let no_progress = matches.get_flag("no-progress");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
-    
+
     // Copy options
     let subdirs = matches.get_flag("subdirs");
     let empty_dirs = matches.get_flag("empty-dirs");
@@ -358,33 +350,48 @@ fn main() -> Result<()> {
     let archive = matches.get_flag("archive");
     // Mirror mode implies empty directories (/E), which implies subdirectories (/S)
     // For directory operations, recursive is always enabled by default
-    let recursive = source.is_dir() || matches.get_flag("recursive") || archive || subdirs || empty_dirs || mirror;
-    
+    let recursive = source.is_dir()
+        || matches.get_flag("recursive")
+        || archive
+        || subdirs
+        || empty_dirs
+        || mirror;
+
     // File filtering
-    let exclude_files: Vec<String> = matches.get_many::<String>("exclude-files")
-        .unwrap_or_default().cloned()
+    let exclude_files: Vec<String> = matches
+        .get_many::<String>("exclude-files")
+        .unwrap_or_default()
+        .cloned()
         .collect();
-    let exclude_dirs: Vec<String> = matches.get_many::<String>("exclude-dirs")
-        .unwrap_or_default().cloned()
+    let exclude_dirs: Vec<String> = matches
+        .get_many::<String>("exclude-dirs")
+        .unwrap_or_default()
+        .cloned()
         .collect();
     let min_size = matches.get_one::<u64>("min-size").copied();
     let max_size = matches.get_one::<u64>("max-size").copied();
-    
+
     // Copy flags
     let copy_flags = matches.get_one::<String>("copy-flags").unwrap();
     let copy_all = matches.get_flag("copy-all");
-    
+
     // Performance
     let num_cpus = std::thread::available_parallelism().unwrap().get();
-    let threads = matches.get_one::<usize>("threads").copied()
+    let threads = matches
+        .get_one::<usize>("threads")
+        .copied()
         .unwrap_or(num_cpus);
-    let block_size = matches.get_one::<usize>("block-size").copied()
+    let block_size = matches
+        .get_one::<usize>("block-size")
+        .copied()
         .unwrap_or(1024);
 
     // Validate thread count based on OS limits
     let max_threads = get_max_thread_count();
     if threads > max_threads {
-        eprintln!("Error: Maximum thread count is {max_threads} to avoid system file handle limits.");
+        eprintln!(
+            "Error: Maximum thread count is {max_threads} to avoid system file handle limits."
+        );
         eprintln!("Requested: {threads}, Maximum allowed: {max_threads}");
         std::process::exit(1);
     }
@@ -392,53 +399,76 @@ fn main() -> Result<()> {
     // Logging
     let log_file = matches.get_one::<String>("log-file");
     let show_eta = matches.get_flag("eta");
-    
-    // Retry options
-    let retry_count = matches.get_one::<u32>("retry-count").copied()
-        .unwrap_or(0);
-    let retry_wait = matches.get_one::<u32>("retry-wait").copied()
-        .unwrap_or(30);
 
-    println!("RoboSync v{}: Fast parallel file synchronization", env!("CARGO_PKG_VERSION"));
+    // Retry options
+    let retry_count = matches.get_one::<u32>("retry-count").copied().unwrap_or(0);
+    let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
+
+    println!(
+        "RoboSync v{}: Fast parallel file synchronization",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Source: {}", source.display());
     println!("Destination: {}", destination.display());
-    
+
     if dry_run {
         println!("Mode: DRY RUN (list only)");
     } else {
         println!("Mode: {}", if parallel { "parallel" } else { "sequential" });
     }
-    
+
     if parallel && !dry_run {
         println!("Threads: {threads} (max allowed: {max_threads})");
         println!("Block size: {block_size} bytes");
     }
-    
+
     // Show active options
     let mut options = Vec::new();
-    if recursive { options.push("recursive"); }
-    if purge { options.push("purge"); }
-    if mirror { options.push("mirror"); }
+    if recursive {
+        options.push("recursive");
+    }
+    if purge {
+        options.push("purge");
+    }
+    if mirror {
+        options.push("mirror");
+    }
     let verbose_str = format!("verbose={verbose}");
-    if verbose > 0 { options.push(&verbose_str); }
-    if confirm { options.push("confirm"); }
-    if compress { options.push("compress"); }
-    if move_files { options.push("move-files"); }
-    if !exclude_files.is_empty() { options.push("exclude-files"); }
-    if !exclude_dirs.is_empty() { options.push("exclude-dirs"); }
-    if min_size.is_some() { options.push("min-size"); }
-    if max_size.is_some() { options.push("max-size"); }
-    
+    if verbose > 0 {
+        options.push(&verbose_str);
+    }
+    if confirm {
+        options.push("confirm");
+    }
+    if compress {
+        options.push("compress");
+    }
+    if move_files {
+        options.push("move-files");
+    }
+    if !exclude_files.is_empty() {
+        options.push("exclude-files");
+    }
+    if !exclude_dirs.is_empty() {
+        options.push("exclude-dirs");
+    }
+    if min_size.is_some() {
+        options.push("min-size");
+    }
+    if max_size.is_some() {
+        options.push("max-size");
+    }
+
     if !options.is_empty() {
         println!("Options: {}", options.join(", "));
     }
-    
+
     if copy_all || archive {
         println!("Copy flags: DATSOU (all)");
     } else {
         println!("Copy flags: {copy_flags}");
     }
-    
+
     if retry_count > 0 {
         println!("Retry: {retry_count} retries, {retry_wait} seconds wait");
     }
@@ -464,10 +494,18 @@ fn main() -> Result<()> {
         exclude_dirs,
         min_size,
         max_size,
-        copy_flags: if copy_all || archive { "DATSOU".to_string() } else { copy_flags.clone() },
+        copy_flags: if copy_all || archive {
+            "DATSOU".to_string()
+        } else {
+            copy_flags.clone()
+        },
         log_file: log_file.cloned(),
         compress,
-        compression_config: if compress { CompressionConfig::balanced() } else { CompressionConfig::default() },
+        compression_config: if compress {
+            CompressionConfig::balanced()
+        } else {
+            CompressionConfig::default()
+        },
         show_eta,
         retry_count,
         retry_wait,
@@ -482,7 +520,7 @@ fn main() -> Result<()> {
             block_size,
             max_parallel_files: threads * 2,
         };
-        
+
         let syncer = ParallelSyncer::new(config);
         let _stats = syncer.synchronize_with_options(source, destination, sync_options)?;
     } else {
@@ -500,25 +538,36 @@ mod tests {
     #[test]
     fn test_get_max_thread_count_returns_valid_range() {
         let max_threads = get_max_thread_count();
-        
+
         // Should return a reasonable number
-        assert!(max_threads >= 16, "Max threads should be at least 16, got {}", max_threads);
-        assert!(max_threads <= 512, "Max threads should be at most 512, got {}", max_threads);
-        
+        assert!(
+            max_threads >= 16,
+            "Max threads should be at least 16, got {}",
+            max_threads
+        );
+        assert!(
+            max_threads <= 512,
+            "Max threads should be at most 512, got {}",
+            max_threads
+        );
+
         // Should be a power-friendly number for efficiency
-        assert!(max_threads % 8 == 0 || max_threads == 64 || max_threads == 128 || max_threads == 256,
-            "Max threads {} should be divisible by 8 or a common power", max_threads);
+        assert!(
+            max_threads % 8 == 0 || max_threads == 64 || max_threads == 128 || max_threads == 256,
+            "Max threads {} should be divisible by 8 or a common power",
+            max_threads
+        );
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_get_max_thread_count_linux() {
         let max_threads = get_max_thread_count();
-        
+
         // Linux should return between 64 and 512
         assert!(max_threads >= 64);
         assert!(max_threads <= 512);
-        
+
         // Try to verify against actual ulimit
         if let Ok(output) = std::process::Command::new("sh")
             .arg("-c")
@@ -552,7 +601,7 @@ mod tests {
     #[cfg(target_os = "freebsd")]
     fn test_get_max_thread_count_freebsd() {
         let max_threads = get_max_thread_count();
-        
+
         // FreeBSD should return between 64 and 256
         assert!(max_threads >= 64);
         assert!(max_threads <= 256);
@@ -564,7 +613,7 @@ mod tests {
         let first_call = get_max_thread_count();
         let second_call = get_max_thread_count();
         let third_call = get_max_thread_count();
-        
+
         assert_eq!(first_call, second_call);
         assert_eq!(second_call, third_call);
     }

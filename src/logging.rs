@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,7 +122,7 @@ impl SyncLogger {
         let eta_str = if progress_ratio > 0.01 && elapsed_secs > 1.0 {
             let estimated_total_time = elapsed_secs / progress_ratio;
             let remaining_time = estimated_total_time - elapsed_secs;
-            
+
             if remaining_time > 0.0 {
                 format_duration(Duration::from_secs_f64(remaining_time))
             } else {
@@ -142,12 +142,7 @@ impl SyncLogger {
 
         format!(
             "Progress: Files {}/{} ({:.1}%), Bytes {:.1}%, Rate: {}, ETA: {}",
-            self.completed_files,
-            self.total_files,
-            file_progress,
-            byte_progress,
-            rate_str,
-            eta_str
+            self.completed_files, self.total_files, file_progress, byte_progress, rate_str, eta_str
         )
     }
 
@@ -157,7 +152,10 @@ impl SyncLogger {
         let elapsed_secs = elapsed.as_secs_f64();
 
         let rate_str = if elapsed_secs > 0.0 {
-            let bytes_per_sec = stats.bytes_transferred.load(std::sync::atomic::Ordering::Relaxed) as f64 / elapsed_secs;
+            let bytes_per_sec = stats
+                .bytes_transferred
+                .load(std::sync::atomic::Ordering::Relaxed) as f64
+                / elapsed_secs;
             format_transfer_rate(bytes_per_sec)
         } else {
             "N/A".to_string()
@@ -172,7 +170,7 @@ impl SyncLogger {
         );
 
         self.log(&summary);
-        
+
         // Display any warnings that were collected during sync
         if let Ok(warnings) = stats.warnings.lock() {
             if !warnings.is_empty() {
@@ -181,7 +179,7 @@ impl SyncLogger {
                 for warning in warnings.iter() {
                     unique_warnings.insert(warning.clone());
                 }
-                
+
                 // Display unique warnings
                 for warning in unique_warnings {
                     self.log(&warning);

@@ -1,8 +1,8 @@
 //! File metadata handling for copy operations
 
-use anyhow::{Result, Context};
-use std::path::Path;
+use anyhow::{Context, Result};
 use std::fs;
+use std::path::Path;
 use std::time::SystemTime;
 
 #[cfg(unix)]
@@ -11,12 +11,12 @@ use std::os::unix::fs::MetadataExt;
 /// Copy flags that determine what metadata to copy
 #[derive(Debug, Clone)]
 pub struct CopyFlags {
-    pub data: bool,        // D - File data
-    pub attributes: bool,  // A - Attributes 
-    pub timestamps: bool,  // T - Timestamps
-    pub security: bool,    // S - Security (permissions)
-    pub owner: bool,       // O - Owner info
-    pub auditing: bool,    // U - Auditing info
+    pub data: bool,       // D - File data
+    pub attributes: bool, // A - Attributes
+    pub timestamps: bool, // T - Timestamps
+    pub security: bool,   // S - Security (permissions)
+    pub owner: bool,      // O - Owner info
+    pub auditing: bool,   // U - Auditing info
 }
 
 impl Default for CopyFlags {
@@ -74,19 +74,26 @@ fn copy_file_with_metadata_internal(
     // Check if source is a symlink - if so, use symlink-specific handling
     let source_metadata = fs::symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
-    
+
     if source_metadata.is_symlink() {
         return copy_symlink_with_metadata(source, destination, flags);
     }
-    
+
     // Always copy data if D flag is set (which it should be for file copies)
     if !flags.data {
-        return Err(anyhow::anyhow!("Data flag (D) must be set for file copying"));
+        return Err(anyhow::anyhow!(
+            "Data flag (D) must be set for file copying"
+        ));
     }
 
     // Copy the file data
-    let bytes_copied = fs::copy(source, destination)
-        .with_context(|| format!("Failed to copy file data: {} -> {}", source.display(), destination.display()))?;
+    let bytes_copied = fs::copy(source, destination).with_context(|| {
+        format!(
+            "Failed to copy file data: {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
 
     // Get source metadata (now we know it's not a symlink, so we can use regular metadata)
     let source_metadata = fs::metadata(source)
@@ -135,28 +142,32 @@ pub fn copy_symlink_with_metadata(
     // Read the symlink target
     let target = fs::read_link(source)
         .with_context(|| format!("Failed to read symlink target: {}", source.display()))?;
-    
+
     // Create the symlink
     create_symlink_cross_platform(&target, destination)?;
-    
+
     // Get source symlink metadata (using symlink_metadata to get info about the link itself)
-    let source_metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("Failed to read source symlink metadata: {}", source.display()))?;
-    
+    let source_metadata = fs::symlink_metadata(source).with_context(|| {
+        format!(
+            "Failed to read source symlink metadata: {}",
+            source.display()
+        )
+    })?;
+
     // Apply metadata based on flags (limited for symlinks)
     // Note: Most metadata operations don't apply to symlinks or behave differently
-    
+
     #[cfg(unix)]
     {
         // On Unix, we can set ownership and some timestamps for symlinks
         if flags.owner {
             copy_symlink_ownership(source, destination, &source_metadata)?;
         }
-        
+
         // Timestamps for symlinks are generally not preserved as they're not very meaningful
         // and can't be set reliably across platforms
     }
-    
+
     // Symlinks don't have "size" in the traditional sense, so we return 0
     Ok(0)
 }
@@ -168,11 +179,16 @@ fn create_symlink_cross_platform(target: &Path, destination: &Path) -> Result<()
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
     }
-    
+
     #[cfg(unix)]
-    std::os::unix::fs::symlink(target, destination)
-        .with_context(|| format!("Failed to create symlink: {} -> {}", destination.display(), target.display()))?;
-    
+    std::os::unix::fs::symlink(target, destination).with_context(|| {
+        format!(
+            "Failed to create symlink: {} -> {}",
+            destination.display(),
+            target.display()
+        )
+    })?;
+
     #[cfg(windows)]
     {
         // On Windows, we need to determine if the target is a directory or file
@@ -183,16 +199,26 @@ fn create_symlink_cross_platform(target: &Path, destination: &Path) -> Result<()
         } else {
             target.to_path_buf()
         };
-        
+
         if target_path.is_dir() {
-            std::os::windows::fs::symlink_dir(target, destination)
-                .with_context(|| format!("Failed to create directory symlink: {} -> {}", destination.display(), target.display()))?;
+            std::os::windows::fs::symlink_dir(target, destination).with_context(|| {
+                format!(
+                    "Failed to create directory symlink: {} -> {}",
+                    destination.display(),
+                    target.display()
+                )
+            })?;
         } else {
-            std::os::windows::fs::symlink_file(target, destination)
-                .with_context(|| format!("Failed to create file symlink: {} -> {}", destination.display(), target.display()))?;
+            std::os::windows::fs::symlink_file(target, destination).with_context(|| {
+                format!(
+                    "Failed to create file symlink: {} -> {}",
+                    destination.display(),
+                    target.display()
+                )
+            })?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -211,12 +237,20 @@ fn copy_symlink_ownership(
 
     // Convert path to CString for lchown
     let dest_cstring = CString::new(destination.as_os_str().to_string_lossy().as_ref())
-        .with_context(|| format!("Failed to convert path to CString: {}", destination.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to convert path to CString: {}",
+                destination.display()
+            )
+        })?;
 
     // Use lchown to change ownership of the symlink itself (not its target)
     unsafe {
         if libc::lchown(dest_cstring.as_ptr(), uid, gid) != 0 {
-            return Err(anyhow::anyhow!("Failed to change symlink ownership: {}", destination.display()));
+            return Err(anyhow::anyhow!(
+                "Failed to change symlink ownership: {}",
+                destination.display()
+            ));
         }
     }
 
@@ -229,10 +263,12 @@ pub fn copy_timestamps(
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
-    let modified = source_metadata.modified()
+    let modified = source_metadata
+        .modified()
         .context("Failed to get source modification time")?;
-    
-    let accessed = source_metadata.accessed()
+
+    let accessed = source_metadata
+        .accessed()
         .context("Failed to get source access time")?;
 
     // Set modification time
@@ -253,7 +289,7 @@ pub fn copy_permissions(
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
     let permissions = source_metadata.permissions();
-    
+
     fs::set_permissions(destination, permissions)
         .with_context(|| format!("Failed to set permissions: {}", destination.display()))?;
 
@@ -279,15 +315,19 @@ pub fn copy_ownership(
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
-    use std::os::unix::fs::fchown;
     use std::fs::File;
+    use std::os::unix::fs::fchown;
 
     let uid = source_metadata.uid();
     let gid = source_metadata.gid();
 
     // Open destination file to get file descriptor
-    let file = File::open(destination)
-        .with_context(|| format!("Failed to open destination for ownership change: {}", destination.display()))?;
+    let file = File::open(destination).with_context(|| {
+        format!(
+            "Failed to open destination for ownership change: {}",
+            destination.display()
+        )
+    })?;
 
     // Change ownership (requires appropriate privileges)
     fchown(&file, Some(uid), Some(gid))
@@ -300,14 +340,13 @@ pub fn copy_ownership(
 fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
     // Use filetime crate for cross-platform timestamp setting
     let filetime_mtime = filetime::FileTime::from(mtime);
-    
+
     // Get current access time to preserve it
-    let metadata = fs::metadata(path)
-        .context("Failed to read file metadata for timestamp update")?;
-    let atime = metadata.accessed()
-        .context("Failed to get access time")?;
+    let metadata =
+        fs::metadata(path).context("Failed to read file metadata for timestamp update")?;
+    let atime = metadata.accessed().context("Failed to get access time")?;
     let filetime_atime = filetime::FileTime::from(atime);
-    
+
     // On Windows, we may need to temporarily remove readonly attribute
     #[cfg(windows)]
     {
@@ -318,26 +357,25 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
             new_permissions.set_readonly(false);
             fs::set_permissions(path, new_permissions)
                 .context("Failed to temporarily remove readonly attribute")?;
-            
+
             // Set the times
             let result = filetime::set_file_times(path, filetime_atime, filetime_mtime);
-            
+
             // Restore original permissions
             fs::set_permissions(path, permissions)
                 .context("Failed to restore readonly attribute")?;
-            
+
             result.context("Failed to set file times")?;
             return Ok(());
         }
     }
-    
+
     // Set access time and modification time
     filetime::set_file_times(path, filetime_atime, filetime_mtime)
         .context("Failed to set file times")?;
-    
+
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
