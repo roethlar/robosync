@@ -138,7 +138,7 @@ fn copy_file_with_metadata_internal(
 pub fn copy_symlink_with_metadata(
     source: &Path,
     destination: &Path,
-    flags: &CopyFlags,
+    _flags: &CopyFlags,
 ) -> Result<u64> {
     // Read the symlink target
     let target = fs::read_link(source)
@@ -148,7 +148,7 @@ pub fn copy_symlink_with_metadata(
     create_symlink_cross_platform(&target, destination)?;
 
     // Get source symlink metadata (using symlink_metadata to get info about the link itself)
-    let source_metadata = fs::symlink_metadata(source).with_context(|| {
+    let _source_metadata = fs::symlink_metadata(source).with_context(|| {
         format!(
             "Failed to read source symlink metadata: {}",
             source.display()
@@ -355,6 +355,7 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
         if permissions.readonly() {
             // Temporarily remove readonly attribute
             let mut new_permissions = permissions.clone();
+            #[allow(clippy::permissions_set_readonly_false)]
             new_permissions.set_readonly(false);
             fs::set_permissions(path, new_permissions)
                 .context("Failed to temporarily remove readonly attribute")?;
