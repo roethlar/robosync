@@ -28,11 +28,19 @@ lz4_flex = "0.11"
 
 # File system operations
 walkdir = "2.0"
+jwalk = "0.8"  # Parallel directory walking
 filetime = "0.2"
+memmap2 = "0.9"  # Memory-mapped files
+
+# Linux-specific high-performance I/O
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+nix = { version = "0.27", features = ["fs", "mman"] }
 
 # Cross-platform support
 crossbeam = "0.8"
 rayon = "1.8"
+num_cpus = "1.16"
 
 # Progress reporting
 indicatif = "0.18.0"

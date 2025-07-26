@@ -20,6 +20,12 @@ pub mod progress;
 pub mod retry;
 pub mod sync;
 
+#[cfg(target_os = "linux")]
+pub mod linux_fast_copy;
+
+#[cfg(target_os = "linux")]
+pub mod linux_parallel_sync;
+
 pub use algorithm::DeltaAlgorithm;
 pub use checksum::ChecksumType;
 pub use options::SyncOptions;

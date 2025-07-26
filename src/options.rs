@@ -26,6 +26,8 @@ pub struct SyncOptions {
     pub retry_count: u32,
     pub retry_wait: u32,
     pub checksum: bool,
+    #[cfg(target_os = "linux")]
+    pub linux_optimized: bool,
 }
 
 impl Default for SyncOptions {
@@ -51,6 +53,8 @@ impl Default for SyncOptions {
             retry_count: 0,
             retry_wait: 30,
             checksum: false,
+            #[cfg(target_os = "linux")]
+            linux_optimized: false,
         }
     }
 }

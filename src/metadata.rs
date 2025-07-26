@@ -55,6 +55,11 @@ pub fn copy_file_with_metadata(
     copy_file_with_metadata_internal(source, destination, flags, None)
 }
 
+/// Fast copy that only copies data without metadata for maximum performance
+pub fn copy_file_data_only(source: &Path, destination: &Path) -> Result<u64> {
+    streaming_copy_optimized(source, destination)
+}
+
 /// Copy a file with specified metadata preservation, with optional warnings collector
 pub fn copy_file_with_metadata_with_warnings(
     source: &Path,
@@ -87,14 +92,8 @@ fn copy_file_with_metadata_internal(
         ));
     }
 
-    // Copy the file data
-    let bytes_copied = fs::copy(source, destination).with_context(|| {
-        format!(
-            "Failed to copy file data: {} -> {}",
-            source.display(),
-            destination.display()
-        )
-    })?;
+    // Always use optimized copy for best performance
+    let bytes_copied = streaming_copy_optimized(source, destination)?;
 
     // Get source metadata (now we know it's not a symlink, so we can use regular metadata)
     let source_metadata = fs::metadata(source)
@@ -378,6 +377,95 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
         .context("Failed to set file times")?;
 
     Ok(())
+}
+
+/// Check if a path is a network path (UNC path on Windows or mounted network drive)
+fn is_network_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        // Check for UNC paths (\\server\share) or network drive letters
+        if let Some(path_str) = path.to_str() {
+            if path_str.starts_with("\\\\") {
+                return true;
+            }
+            // Could also check if drive letter is a network drive using WinAPI
+        }
+    }
+    
+    #[cfg(unix)]
+    {
+        // On Unix, check for common network mount points
+        if let Some(path_str) = path.to_str() {
+            if path_str.starts_with("/mnt/") || path_str.starts_with("/media/") 
+                || path_str.starts_with("/net/") || path_str.starts_with("/smb/") {
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
+/// Optimized streaming copy for network transfers
+fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
+    // For Windows, use native APIs for maximum performance
+    #[cfg(windows)]
+    {
+        // Try to use Windows native copy first for optimal performance
+        match windows_native_copy(source, destination) {
+            Ok(bytes) => return Ok(bytes),
+            Err(_) => {
+                // Fall back to standard copy if native fails
+            }
+        }
+    }
+    
+    // Use unbuffered I/O for better performance on large files
+    use std::fs::File;
+    use std::io::{Read, Write};
+    
+    // Use much larger buffer for network transfers (32MB)
+    const NETWORK_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+    
+    let mut source_file = File::open(source)
+        .with_context(|| format!("Failed to open source file: {}", source.display()))?;
+    let mut dest_file = File::create(destination)
+        .with_context(|| format!("Failed to create destination file: {}", destination.display()))?;
+    
+    // Pre-allocate destination file for better performance
+    if let Ok(metadata) = source_file.metadata() {
+        let _ = dest_file.set_len(metadata.len());
+    }
+    
+    // Direct I/O without buffering for maximum throughput
+    let mut buffer = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut total_bytes = 0u64;
+    
+    loop {
+        let bytes_read = source_file.read(&mut buffer)
+            .with_context(|| format!("Failed to read from source: {}", source.display()))?;
+        
+        if bytes_read == 0 {
+            break;
+        }
+        
+        dest_file.write_all(&buffer[..bytes_read])
+            .with_context(|| format!("Failed to write to destination: {}", destination.display()))?;
+        
+        total_bytes += bytes_read as u64;
+    }
+    
+    dest_file.sync_all()
+        .with_context(|| format!("Failed to sync destination: {}", destination.display()))?;
+    
+    Ok(total_bytes)
+}
+
+#[cfg(windows)]
+fn windows_native_copy(source: &Path, destination: &Path) -> Result<u64> {
+    // Use standard fs::copy which on Windows uses CopyFileW internally
+    fs::copy(source, destination)
+        .with_context(|| format!("Failed to copy file: {} -> {}", source.display(), destination.display()))
 }
 
 #[cfg(test)]

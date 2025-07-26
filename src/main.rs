@@ -28,8 +28,9 @@ fn get_max_thread_count() -> usize {
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows has different handle limits, but 128 works well in practice
-        128
+        // Windows can handle more threads, especially for file copying
+        // Modern Windows systems have much higher handle limits
+        256
     }
     #[cfg(target_os = "linux")]
     {
@@ -307,8 +308,20 @@ fn main() -> Result<()> {
                 .long("compress")
                 .help("Compress file data during transfer")
                 .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
+        );
+        
+        #[cfg(target_os = "linux")]
+        let matches = matches.arg(
+            Arg::new("linux-optimized")
+                .long("linux-optimized")
+                .help("Enable Linux-specific optimizations for small files")
+                .action(clap::ArgAction::SetTrue)
+        );
+        
+        #[cfg(not(target_os = "linux"))]
+        let matches = matches;
+        
+        let matches = matches.arg(
             Arg::new("dry-run")
                 .short('n')
                 .short_alias('N')
@@ -341,6 +354,10 @@ fn main() -> Result<()> {
     let no_progress = matches.get_flag("no-progress");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
+    #[cfg(target_os = "linux")]
+    let linux_optimized = matches.get_flag("linux-optimized");
+    #[cfg(not(target_os = "linux"))]
+    let linux_optimized = false;
 
     // Copy options
     let subdirs = matches.get_flag("subdirs");
@@ -510,6 +527,8 @@ fn main() -> Result<()> {
         retry_count,
         retry_wait,
         checksum,
+        #[cfg(target_os = "linux")]
+        linux_optimized,
     };
 
     if parallel && !dry_run {

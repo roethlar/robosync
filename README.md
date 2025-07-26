@@ -30,7 +30,7 @@ RoboSync combines the best features of RoboCopy and rsync into a modern, high-pe
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/robosync.git
+git clone https://github.com/roethlar/robosync.git
 cd robosync
 cargo build --release
 ```
@@ -39,7 +39,7 @@ The binary will be available at `target/release/robosync`
 
 ### From Releases
 
-Download pre-built binaries from the [releases page](https://github.com/yourusername/robosync/releases).
+Download pre-built binaries from the [releases page](https://github.com/roethlar/robosync/releases).
 
 ## Usage
 

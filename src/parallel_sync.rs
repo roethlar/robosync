@@ -1,7 +1,6 @@
 //! Multithreaded synchronization implementation
 
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +14,8 @@ use crate::file_list::{
     generate_file_list_with_options, generate_file_list_with_options_and_progress, FileInfo,
     FileOperation,
 };
+#[cfg(target_os = "linux")]
+use crate::file_list::generate_file_list_parallel;
 use crate::logging::SyncLogger;
 use crate::metadata::{copy_file_with_metadata, copy_file_with_metadata_with_warnings, CopyFlags};
 use crate::options::SyncOptions;
@@ -82,6 +83,53 @@ impl ParallelSyncer {
                 )
             })?;
             println!("Created destination directory: {}", destination.display());
+        }
+
+        // Pre-warm network connection for UNC paths or mapped network drives to avoid initial delay
+        #[cfg(windows)]
+        {
+            use std::time::Duration;
+            
+            // Check if destination might be a network location
+            let is_network = destination.to_str().map(|s| s.starts_with("\\\\")).unwrap_or(false);
+            let is_mapped_drive = destination.to_str()
+                .and_then(|s| s.chars().next())
+                .map(|c| c.is_ascii_alphabetic() && destination.to_str().unwrap().chars().nth(1) == Some(':'))
+                .unwrap_or(false);
+            
+            if is_network || is_mapped_drive {
+                println!("Testing network connection to destination...");
+                
+                // Try to create a test file to establish connection and verify write access
+                let test_file = destination.join(".robosync_test");
+                match std::fs::write(&test_file, b"test") {
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&test_file);
+                        println!("Network connection established successfully.");
+                    }
+                    Err(e) => {
+                        // If we can't write, at least try to read to establish connection
+                        println!("Warning: Could not write test file: {}", e);
+                        println!("Attempting to establish read connection...");
+                        
+                        // Try with timeout
+                        let start = std::time::Instant::now();
+                        let timeout = Duration::from_secs(30);
+                        
+                        while start.elapsed() < timeout {
+                            if fs::metadata(&destination).is_ok() {
+                                println!("Read connection established.");
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        
+                        if start.elapsed() >= timeout {
+                            eprintln!("Warning: Network connection is slow or unresponsive");
+                        }
+                    }
+                }
+            }
         }
 
         if source.is_file() {
@@ -162,6 +210,16 @@ impl ParallelSyncer {
             source_files
         } else {
             logger.log("Scanning source directory...");
+            #[cfg(target_os = "linux")]
+            let files = if options.linux_optimized {
+                logger.log("Using Linux-optimized parallel scanning...");
+                generate_file_list_parallel(source, options)
+                    .context("Failed to generate source file list")?
+            } else {
+                generate_file_list_with_options(source, options)
+                    .context("Failed to generate source file list")?
+            };
+            #[cfg(not(target_os = "linux"))]
             let files = generate_file_list_with_options(source, options)
                 .context("Failed to generate source file list")?;
             logger.log(&format!("Found {} items in source", files.len()));
@@ -192,6 +250,16 @@ impl ParallelSyncer {
                 files
             } else {
                 logger.log("Scanning destination directory...");
+                #[cfg(target_os = "linux")]
+                let files = if options.linux_optimized {
+                    logger.log("Using Linux-optimized parallel scanning...");
+                    generate_file_list_parallel(destination, options)
+                        .context("Failed to generate destination file list")?
+                } else {
+                    generate_file_list_with_options(destination, options)
+                        .context("Failed to generate destination file list")?
+                };
+                #[cfg(not(target_os = "linux"))]
                 let files = generate_file_list_with_options(destination, options)
                     .context("Failed to generate destination file list")?;
                 logger.log(&format!("Found {} items in destination", files.len()));
@@ -580,10 +648,19 @@ impl ParallelSyncer {
         let stats = Arc::new(SyncStats::new());
 
         // Set up Rayon thread pool for parallel processing
+        // For network drives, use more threads to hide latency
+        let effective_threads = if destination.to_str().map(|s| s.starts_with("\\\\") || s.contains(":")).unwrap_or(false) {
+            self.config.worker_threads * 2  // Double threads for network operations
+        } else {
+            self.config.worker_threads
+        };
+        
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.config.worker_threads)
+            .num_threads(effective_threads)
             .build()
             .context("Failed to create thread pool")?;
+            
+        println!("DEBUG: Using {} threads for parallel operations", effective_threads);
 
         // Separate operations by type for optimal ordering
         let (dir_ops, file_ops): (Vec<_>, Vec<_>) = operations
@@ -596,63 +673,178 @@ impl ParallelSyncer {
             .partition(|op| !matches!(op, FileOperation::Delete { .. }));
 
         // Create directories first (sequentially to avoid race conditions)
-        for operation in dir_ops {
-            self.execute_operation(operation, source, destination, &stats, options, &mut logger)?;
-            logger.update_progress(1, 0);
-            if let Some(ref progress) = progress {
-                if let Ok(mut p) = progress.lock() {
-                    p.update_file_complete(0);
+        if !dir_ops.is_empty() {
+            println!("DEBUG: Creating {} directories...", dir_ops.len());
+            if options.verbose >= 1 {
+                logger.log(&format!("Creating {} directories...", dir_ops.len()));
+            }
+            for operation in dir_ops {
+                self.execute_operation(operation, source, destination, &stats, options, &mut logger)?;
+                logger.update_progress(1, 0);
+                if let Some(ref progress) = progress {
+                    if let Ok(mut p) = progress.lock() {
+                        p.update_file_complete(0);
+                    }
                 }
             }
         }
 
         // Batch small files for efficient processing
+        println!("DEBUG: Starting file categorization of {} operations", file_ops.len());
         let (small_files, large_files): (Vec<_>, Vec<_>) = file_ops
             .into_iter()
             .partition(|op| self.is_small_file_operation(op, &source_files));
+        println!("DEBUG: Categorized {} small files, {} large files", small_files.len(), large_files.len());
+
+        // Log file processing start
+        if options.verbose >= 1 {
+            logger.log(&format!("Processing {} small files and {} large files...", 
+                small_files.len(), large_files.len()));
+        }
+        
+        // Additional debug info for network drives
+        if destination.to_str().map(|s| s.starts_with("\\\\") || s.contains(":")).unwrap_or(false) {
+            logger.log(&format!("Note: Destination appears to be a network location. Operations may be slower than local disk."));
+            logger.log(&format!("Using {} threads with batch size of 100 for small files", self.config.worker_threads));
+        }
 
         // Process files in parallel - note: logger is not thread-safe for parallel updates
         // We'll collect stats and update at the end of each operation
         let logger_arc = Arc::new(Mutex::new(logger));
+        let progress_arc = progress.clone();
 
         // Process small files in batches
         if !small_files.is_empty() {
-            let batch_size = 10; // Process 10 small files per thread
-            pool.install(|| {
-                small_files
-                    .par_chunks(batch_size)
-                    .try_for_each(|batch| -> Result<()> {
-                        // Process a batch of small files in sequence on this thread
-                        for operation in batch {
-                            let logger_ref = Arc::clone(&logger_arc);
-                            let file_stats = self.execute_operation_parallel(
-                                operation.clone(),
-                                source,
-                                destination,
-                                &stats,
-                                options,
-                                logger_ref,
-                            )?;
-
-                            if let Some(ref progress) = progress {
-                                if let Ok(mut p) = progress.lock() {
-                                    p.update_file_complete(file_stats.get_bytes_transferred());
-                                }
+            let small_files_count = small_files.len();
+            if options.verbose >= 1 {
+                logger_arc.lock().unwrap().log(&format!("Starting parallel processing of {} small files", small_files_count));
+            }
+            
+            // Pre-create all necessary directories to avoid redundant checks
+            println!("DEBUG: Starting directory pre-creation for {} small files", small_files_count);
+            let mut dirs_to_create = std::collections::HashSet::new();
+            for operation in &small_files {
+                match operation {
+                    FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                        if let Ok(dest_path) = self.map_source_to_dest(path, source, destination) {
+                            if let Some(parent) = dest_path.parent() {
+                                dirs_to_create.insert(parent.to_path_buf());
                             }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Create all directories at once
+            println!("DEBUG: Creating {} unique directories", dirs_to_create.len());
+            for dir in dirs_to_create {
+                let _ = fs::create_dir_all(dir);
+            }
+            println!("DEBUG: Directory creation complete, starting parallel file processing");
+            
+            // For now, use standard parallel copy on all platforms
+            // TODO: Integrate Linux-specific optimizations when module import issues are resolved
+            let verbose = options.verbose;
+            
+            // Add atomic counter to track which file causes hang
+            let file_counter = std::sync::atomic::AtomicU64::new(0);
+            
+            pool.install(|| {
+                use rayon::prelude::*;
+                small_files
+                    .into_par_iter()
+                    .try_for_each(|operation| -> Result<()> {
+                        match operation {
+                            FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                                let current_file = file_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let start_time = std::time::Instant::now();
+                                if current_file % 100 == 0 || current_file > 3560 {
+                                    println!("Processing file #{}: {}", current_file, path.display());
+                                }
+                                // Use symlink_metadata to check without following symlinks
+                                if let Ok(metadata) = fs::symlink_metadata(&path) {
+                                    let file_type = metadata.file_type();
+                                    
+                                    // Handle symlinks specially
+                                    if file_type.is_symlink() {
+                                        if verbose >= 1 {
+                                            println!("Handling symlink: {}", path.display());
+                                        }
+                                        let dest_path = self.map_source_to_dest(&path, source, destination)?;
+                                        
+                                        // Copy the symlink itself, not what it points to
+                                        if let Ok(target) = fs::read_link(&path) {
+                                            // Remove destination if it exists
+                                            let _ = fs::remove_file(&dest_path);
+                                            
+                                            #[cfg(unix)]
+                                            {
+                                                use std::os::unix::fs::symlink;
+                                                symlink(&target, &dest_path)?;
+                                            }
+                                            #[cfg(windows)]
+                                            {
+                                                // On Windows, just skip symlinks for now
+                                                if verbose >= 1 {
+                                                    println!("Skipping symlink on Windows: {}", path.display());
+                                                }
+                                            }
+                                        }
+                                        return Ok(());
+                                    }
+                                    
+                                    // Skip other special files
+                                    if !file_type.is_file() && !file_type.is_dir() {
+                                        if verbose >= 1 {
+                                            println!("Skipping special file: {}", path.display());
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                                
+                                let dest_path = self.map_source_to_dest(&path, source, destination)?;
+                                
+                                // Debug: Log files being processed in verbose mode
+                                if verbose >= 2 {
+                                    println!("Copying: {} -> {}", path.display(), dest_path.display());
+                                }
+                                
+                                let bytes_copied = fs::copy(&path, &dest_path)?;
+                                stats.add_bytes_transferred(bytes_copied);
+                                
+                                // Log slow files
+                                let elapsed = start_time.elapsed();
+                                if elapsed.as_secs() > 1 {
+                                    println!("SLOW FILE #{}: {} took {:.2}s ({} bytes)", 
+                                        current_file, path.display(), elapsed.as_secs_f64(), bytes_copied);
+                                }
+                                
+                                // Temporarily disable progress updates for small files to avoid mutex contention
+                                // TODO: Implement lock-free progress tracking
+                            }
+                            _ => {}
                         }
                         Ok(())
                     })
             })?;
+            
+            // Update progress for all small files at once
+            if let Ok(mut log) = logger_arc.lock() {
+                log.update_progress(small_files_count as u64, 0);
+            }
         }
 
         // Process large files individually in parallel
         if !large_files.is_empty() {
             pool.install(|| {
+                use rayon::prelude::*;
                 large_files
                     .par_iter()
                     .try_for_each(|operation| -> Result<()> {
                         // Clone logger reference for thread safety
                         let logger_ref = Arc::clone(&logger_arc);
+                        let progress_ref = progress_arc.clone();
                         let file_stats = self.execute_operation_parallel(
                             operation.clone(),
                             source,
@@ -662,11 +854,7 @@ impl ParallelSyncer {
                             logger_ref,
                         )?;
 
-                        if let Some(ref progress) = progress {
-                            if let Ok(mut p) = progress.lock() {
-                                p.update_file_complete(file_stats.get_bytes_transferred());
-                            }
-                        }
+                        // Skip progress updates during parallel processing
 
                         Ok(())
                     })
@@ -735,18 +923,24 @@ impl ParallelSyncer {
             }
             FileOperation::Create { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let file_size = fs::metadata(&path)?.len();
-
-                if options.verbose >= 2 {
+                
+                // Get file info before operations for better error reporting
+                let file_metadata = fs::metadata(&path)
+                    .with_context(|| format!("Failed to read source file metadata: {}", path.display()))?;
+                let file_size = file_metadata.len();
+                
+                if options.verbose >= 1 {
                     logger.log(&format!(
                         "    Copying File    {:>12}  {} -> {}",
                         file_size,
                         path.display(),
                         dest_path.display()
                     ));
+                }
+                
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
                 }
 
                 // Parse copy flags and copy file with metadata
@@ -805,7 +999,8 @@ impl ParallelSyncer {
                     logger.log(&message);
                 }
 
-                if use_delta {
+                // Always skip delta for now - just do a full copy for maximum performance
+                if false && use_delta {
                     let file_stats = self.sync_file_pair(&path, &dest_path, options)?;
                     stats.add_bytes_transferred(file_stats.get_bytes_transferred());
                     Ok(file_stats)
@@ -946,35 +1141,21 @@ impl ParallelSyncer {
                     format!("Failed to create directory: {}", dest_path.display())
                 })?;
 
-                // Update logger in thread-safe manner
-                if let Ok(mut log) = logger.lock() {
-                    log.update_progress(1, 0);
-                }
+                // Skip logger updates in parallel mode
 
                 Ok(SyncStats::default())
             }
             FileOperation::Create { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
+                
+                // Create parent directory if needed
                 if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let file_size = fs::metadata(&path)?.len();
-
-                if options.verbose >= 2 {
-                    if let Ok(log) = logger.lock() {
-                        log.log(&format!(
-                            "    Copying File    {:>12}  {} -> {}",
-                            file_size,
-                            path.display(),
-                            dest_path.display()
-                        ));
-                    }
+                    let _ = fs::create_dir_all(parent);
                 }
 
-                // Parse copy flags and copy file with metadata
-                let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                let bytes_copied =
-                    self.copy_file_with_retry(&path, &dest_path, &copy_flags, options)?;
+                // SUPER SIMPLE COPY - just use fs::copy directly
+                let bytes_copied = fs::copy(&path, &dest_path)
+                    .with_context(|| format!("Failed to copy: {} -> {}", path.display(), dest_path.display()))?;
 
                 // If move mode is enabled, delete source file after successful copy
                 if options.move_files && !options.dry_run {
@@ -990,10 +1171,7 @@ impl ParallelSyncer {
 
                 stats.add_bytes_transferred(bytes_copied);
 
-                // Update logger progress
-                if let Ok(mut log) = logger.lock() {
-                    log.update_progress(1, bytes_copied);
-                }
+                // Skip logger update here - will be done in batch
 
                 let stats = SyncStats::default();
                 stats.add_bytes_transferred(bytes_copied);
@@ -1021,52 +1199,25 @@ impl ParallelSyncer {
                     }
                 }
 
-                let file_stats = if use_delta {
-                    self.sync_file_pair(&path, &dest_path, options)?
-                } else {
-                    // Parse copy flags and copy file with metadata
-                    let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                    let bytes_copied = self.copy_file_with_retry_with_warnings(
-                        &path,
-                        &dest_path,
-                        &copy_flags,
-                        options,
-                        &stats.warnings,
-                    )?;
+                // SUPER SIMPLE COPY for updates too
+                let bytes_copied = fs::copy(&path, &dest_path)
+                    .with_context(|| format!("Failed to update: {} -> {}", path.display(), dest_path.display()))?;
 
-                    // If move mode is enabled, delete source file after successful copy
-                    if options.move_files && !options.dry_run {
-                        fs::remove_file(&path).with_context(|| {
-                            format!(
-                                "Failed to delete source file after move: {}",
-                                path.display()
-                            )
-                        })?;
-
-                        if options.verbose >= 2 {
-                            if let Ok(log) = logger.lock() {
-                                log.log(&format!(
-                                    "    Moved File      {:>12}  {} -> {}",
-                                    file_size,
-                                    path.display(),
-                                    dest_path.display()
-                                ));
-                            }
-                        }
-                    }
-
-                    let stats = SyncStats::default();
-                    stats.add_bytes_transferred(bytes_copied);
-                    stats
-                };
-
-                stats.add_bytes_transferred(file_stats.get_bytes_transferred());
-
-                // Update logger progress
-                if let Ok(mut log) = logger.lock() {
-                    log.update_progress(1, file_stats.get_bytes_transferred());
+                // If move mode is enabled, delete source file after successful copy
+                if options.move_files && !options.dry_run {
+                    fs::remove_file(&path).with_context(|| {
+                        format!(
+                            "Failed to delete source file after move: {}",
+                            path.display()
+                        )
+                    })?;
                 }
 
+                stats.add_bytes_transferred(bytes_copied);
+
+                // Skip logger update here - will be done in batch
+                let file_stats = SyncStats::default();
+                file_stats.add_bytes_transferred(bytes_copied);
                 Ok(file_stats)
             }
             FileOperation::Delete { path } => {
@@ -1406,6 +1557,7 @@ impl ParallelSyncer {
         algorithm: &DeltaAlgorithm,
         data: &[u8],
     ) -> Result<Vec<BlockChecksum>> {
+        use rayon::prelude::*;
         let block_size = self.config.block_size;
 
         // Split data into chunks for parallel processing
@@ -1713,7 +1865,7 @@ impl ParallelSyncer {
         use std::fs::File;
         use std::io::{BufReader, BufWriter, Read, Write};
 
-        const BUFFER_SIZE: usize = 256 * 1024; // 256KB buffer
+        const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB buffer for better network performance
 
         let source_file = File::open(source)
             .with_context(|| format!("Failed to open source file: {}", source.display()))?;

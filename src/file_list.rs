@@ -5,7 +5,8 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-// Note: Removed unused imports - we now use blake3 directly for better performance
+
+// Note: rayon is imported inside functions that use it to avoid conflicts
 
 /// File metadata for synchronization
 #[derive(Debug, Clone)]
@@ -170,6 +171,80 @@ where
     }
 
     Ok(file_infos)
+}
+
+/// Generate file list using parallel directory scanning (Linux optimized)
+#[cfg(target_os = "linux")]
+pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
+    use jwalk::WalkDir as JWalkDir;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use rayon::prelude::*;
+    
+    let file_count = AtomicUsize::new(0);
+    
+    // Use jwalk for parallel directory traversal
+    let entries: Vec<FileInfo> = JWalkDir::new(root)
+        .parallelism(jwalk::Parallelism::RayonNewPool(num_cpus::get()))
+        .skip_hidden(false)
+        .into_iter()
+        .par_bridge()  // Convert to parallel iterator
+        .filter_map(|entry| {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    
+                    // Get metadata
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => return None,
+                    };
+                    
+                    let is_symlink = metadata.is_symlink();
+                    let symlink_target = if is_symlink {
+                        std::fs::read_link(&path).ok()
+                    } else {
+                        None
+                    };
+                    
+                    let file_info = FileInfo {
+                        path: path,
+                        size: metadata.len(),
+                        modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                        is_directory: metadata.is_dir(),
+                        is_symlink,
+                        symlink_target,
+                        checksum: None,
+                    };
+                    
+                    // Apply filters
+                    if should_include_file(&file_info, root, options) {
+                        file_count.fetch_add(1, Ordering::Relaxed);
+                        Some(file_info)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        })
+        .collect();
+    
+    // If checksums are needed, compute them in parallel
+    if options.checksum {
+        let entries_with_checksums: Vec<FileInfo> = entries
+            .into_par_iter()
+            .map(|mut file_info| {
+                if !file_info.is_directory && !file_info.is_symlink {
+                    file_info.checksum = compute_file_checksum(&file_info.path)?;
+                }
+                Ok(file_info)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        
+        Ok(entries_with_checksums)
+    } else {
+        Ok(entries)
+    }
 }
 
 /// Check if a file should be included based on filtering options
@@ -675,11 +750,11 @@ fn compute_file_checksum(path: &Path) -> Result<Option<Vec<u8>>> {
     use std::io::{BufReader, Read};
 
     let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file); // 64KB buffer
+    let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer for better performance
 
     // Use Blake3 streaming hasher for memory efficiency
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = [0u8; 1024 * 1024];
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;

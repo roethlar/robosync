@@ -1,0 +1,3 @@
+@echo off
+echo Testing with actual RoboCopy for comparison...
+robocopy "C:\Program Files (x86)\Steam\steamapps\" "H:\stuff\backup\steam\steamapps\" /E /MT:32 /R:1 /W:1 /NP /NDL /TEE /XX
