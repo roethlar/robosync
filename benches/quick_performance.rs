@@ -12,7 +12,7 @@ fn create_test_files(dir: &Path, num_files: usize, file_size: usize) -> Result<(
     let content = vec![b'A'; file_size];
     
     for i in 0..num_files {
-        let file_path = dir.join(format!("file_{}.txt", i));
+        let file_path = dir.join(format!("file_{i}.txt"));
         fs::write(&file_path, &content)?;
     }
     
@@ -27,7 +27,7 @@ fn bench_file_scanning(c: &mut Criterion) {
     let mut group = c.benchmark_group("file_scanning");
     
     for &num_files in &[100, 500, 1000] {
-        let test_dir = base_path.join(format!("scan_{}", num_files));
+        let test_dir = base_path.join(format!("scan_{num_files}"));
         create_test_files(&test_dir, num_files, 1024).unwrap(); // 1KB files
         
         group.throughput(Throughput::Elements(num_files as u64));
@@ -54,7 +54,7 @@ fn bench_checksum_performance(c: &mut Criterion) {
     let mut group = c.benchmark_group("checksum_performance");
     
     for &file_size in &[10_240, 102_400, 1_024_000] { // 10KB, 100KB, 1MB
-        let test_dir = base_path.join(format!("checksum_{}", file_size));
+        let test_dir = base_path.join(format!("checksum_{file_size}"));
         create_test_files(&test_dir, 50, file_size).unwrap(); // 50 files of each size
         
         group.throughput(Throughput::Bytes((file_size * 50) as u64));

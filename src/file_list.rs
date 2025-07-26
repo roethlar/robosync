@@ -104,7 +104,7 @@ where
             None
         };
 
-        let mut file_info = FileInfo {
+        let file_info = FileInfo {
             path: path.to_path_buf(),
             size: metadata.len(),
             modified: metadata.modified()?,
@@ -583,11 +583,7 @@ fn should_use_delta(source: &FileInfo, target: &FileInfo) -> bool {
         return false;
     }
     
-    let size_diff = if source.size > target.size {
-        source.size - target.size
-    } else {
-        target.size - source.size
-    };
+    let size_diff = source.size.abs_diff(target.size);
     
     let size_diff_ratio = size_diff as f64 / target.size.max(source.size) as f64;
     
@@ -728,7 +724,8 @@ mod tests {
             purge: false,
             mirror: false,
             dry_run: false,
-            verbose: false,
+            verbose: 0,
+            confirm: false,
             no_progress: false,
             move_files: false,
             exclude_files: vec!["*.tmp".to_string(), "*.log".to_string()],

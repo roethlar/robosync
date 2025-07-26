@@ -15,7 +15,7 @@ use crate::options::SyncOptions;
 use crate::metadata::{CopyFlags, copy_file_with_metadata};
 use crate::logging::SyncLogger;
 use crate::compression::{decompress_data, CompressionType};
-use crate::retry::{RetryConfig, with_retry, is_retryable_error};
+use crate::retry::{RetryConfig, with_retry};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 /// Configuration for multithreaded synchronization
@@ -60,7 +60,7 @@ impl ParallelSyncer {
         destination: PathBuf,
         options: SyncOptions,
     ) -> Result<SyncStats> {
-        let start_time = Instant::now();
+        let _start_time = Instant::now();
         
         println!("Starting parallel synchronization...");
         println!("  Source: {}", source.display());
@@ -120,8 +120,8 @@ impl ParallelSyncer {
         // Create logger and multi-progress for this sync operation
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
         
-        // Create MultiProgress for analysis phase - disable for -vv mode
-        let multi_progress = if options.no_progress || options.verbose >= 2 {
+        // Create MultiProgress for analysis phase - always use for scanning progress
+        let multi_progress = if options.no_progress {
             None
         } else {
             // In indicatif 0.18, MultiProgress automatically handles rendering
@@ -235,19 +235,19 @@ impl ParallelSyncer {
                 );
                 pb.enable_steady_tick(std::time::Duration::from_millis(100));
                 
-                let purge_ops = self.find_purge_operations_with_progress(&source_files, &dest_files, source, destination, |count| {
+                let purge_ops = self.find_purge_operations_with_progress(&source_files, &dest_files, source, destination, |_count| {
                     // Don't update position since it completes too fast to see
                 })?;
                 let purge_count = purge_ops.len();
                 operations.extend(purge_ops);
                 
-                pb.finish_with_message(format!("Purge analysis complete - {} files to remove", purge_count));
+                pb.finish_with_message(format!("Purge analysis complete - {purge_count} files to remove"));
             } else {
                 logger.log("Finding files to purge...");
                 let purge_ops = self.find_purge_operations(&source_files, &dest_files, source, destination)?;
                 let purge_count = purge_ops.len();
                 operations.extend(purge_ops);
-                logger.log(&format!("Purge analysis complete - {} files to remove", purge_count));
+                logger.log(&format!("Purge analysis complete - {purge_count} files to remove"));
             }
         }
         
@@ -284,8 +284,8 @@ impl ParallelSyncer {
             operations.iter().filter(|op| matches!(op, FileOperation::Delete { .. })).count()
         ));
 
-        // Show file list only in verbose mode
-        if options.verbose >= 1 {
+        // Show file list only in verbose mode (but not when using --confirm, as it shows summary instead)
+        if options.verbose >= 1 && !options.confirm {
             // Use MultiProgress's println if available, otherwise use logger
             if let Some(ref mp) = multi_progress {
                 let _ = mp.println("\nFile operations to be performed:");
@@ -368,6 +368,11 @@ impl ParallelSyncer {
             }
         }
         
+        // Clear MultiProgress before confirmation prompt to ensure clean output
+        if let Some(ref mp) = multi_progress {
+            mp.clear().ok();
+        }
+        
         // Ask for confirmation if requested
         if options.confirm && !operations.is_empty() {
             use std::io::{self, Write};
@@ -385,7 +390,7 @@ impl ParallelSyncer {
             for op in &operations {
                 match op {
                     FileOperation::Create { path } => {
-                        if source_file_map.get(path).map_or(false, |f| f.is_directory) {
+                        if source_file_map.get(path).is_some_and(|f| f.is_directory) {
                             new_dirs += 1;
                         } else {
                             new_files += 1;
@@ -400,11 +405,11 @@ impl ParallelSyncer {
             
             // For confirmation, always use regular output to avoid MultiProgress clearing
             logger.log("\nPending Operation Summary:");
-            if new_files > 0 { logger.log(&format!("  New Files: {}", new_files)); }
-            if new_dirs > 0 { logger.log(&format!("  New Directories: {}", new_dirs)); }
-            if updates > 0 { logger.log(&format!("  Updates: {}", updates)); }
-            if deletions > 0 { logger.log(&format!("  Deletions: {}", deletions)); }
-            if symlinks > 0 { logger.log(&format!("  Symlinks: {}", symlinks)); }
+            if new_files > 0 { logger.log(&format!("  New Files: {new_files}")); }
+            if new_dirs > 0 { logger.log(&format!("  New Directories: {new_dirs}")); }
+            if updates > 0 { logger.log(&format!("  Updates: {updates}")); }
+            if deletions > 0 { logger.log(&format!("  Deletions: {deletions}")); }
+            if symlinks > 0 { logger.log(&format!("  Symlinks: {symlinks}")); }
             logger.log("");
             
             // Ask for confirmation
@@ -414,12 +419,11 @@ impl ParallelSyncer {
             io::stdin().read_line(&mut input).unwrap();
             let input = input.trim().to_lowercase();
             
-            if input != "y" && input != "yes" && input != "" {
+            if input != "y" && input != "yes" && !input.is_empty() {
                 logger.log("Operation cancelled by user.");
                 return Ok(SyncStats::default());
             }
         }
-
 
         // Create progress tracking - disable for -vv mode
         let progress = if options.no_progress || options.verbose >= 2 {
@@ -513,10 +517,8 @@ impl ParallelSyncer {
                         if let Some(ref progress) = progress {
                             if let Ok(mut p) = progress.lock() {
                                 p.update_file_complete(file_stats.get_bytes_transferred());
-                            } else {
-                            }
-                        } else {
-                        }
+                            } 
+                        } 
                         
                         
                         Ok(())
@@ -604,7 +606,7 @@ impl ParallelSyncer {
                 }
                 
                 stats.add_bytes_transferred(bytes_copied);
-                let mut stats = SyncStats::default();
+                let stats = SyncStats::default();
                 stats.add_bytes_transferred(bytes_copied);
                 Ok(stats)
             }
@@ -642,7 +644,7 @@ impl ParallelSyncer {
                     }
                     
                     stats.add_bytes_transferred(bytes_copied);
-                    let mut stats = SyncStats::default();
+                    let stats = SyncStats::default();
                 stats.add_bytes_transferred(bytes_copied);
                 Ok(stats)
                 }
@@ -765,7 +767,7 @@ impl ParallelSyncer {
                     log.update_progress(1, bytes_copied);
                 }
                 
-                let mut stats = SyncStats::default();
+                let stats = SyncStats::default();
                 stats.add_bytes_transferred(bytes_copied);
                 Ok(stats)
             }
@@ -802,7 +804,7 @@ impl ParallelSyncer {
                         }
                     }
                     
-                    let mut stats = SyncStats::default();
+                    let stats = SyncStats::default();
                     stats.add_bytes_transferred(bytes_copied);
                     stats
                 };
@@ -1179,8 +1181,6 @@ impl ParallelSyncer {
     {
         use std::collections::HashSet;
         use rayon::prelude::*;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
         
         // Create a set of all source file paths (relative to source root) in parallel
         // Pre-allocate capacity to avoid rehashing
@@ -1427,7 +1427,7 @@ impl SyncStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    
 
     #[test]
     fn test_parallel_sync_config() {

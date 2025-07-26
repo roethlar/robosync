@@ -44,7 +44,7 @@ where
             Ok(result) => {
                 if attempt > 0 {
                     if let Some(ref mut log) = logger {
-                        log.log(&format!("    {} succeeded after {} retries", description, attempt));
+                        log.log(&format!("    {description} succeeded after {attempt} retries"));
                     }
                 }
                 return Ok(result);
@@ -100,13 +100,12 @@ pub fn is_retryable_error(error: &anyhow::Error) -> bool {
     
     // Check if it's an I/O error
     if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-        match io_error.kind() {
+        matches!(io_error.kind(), 
             std::io::ErrorKind::PermissionDenied |
             std::io::ErrorKind::WouldBlock |
             std::io::ErrorKind::TimedOut |
-            std::io::ErrorKind::Interrupted => true,
-            _ => false,
-        }
+            std::io::ErrorKind::Interrupted
+        )
     } else {
         false
     }

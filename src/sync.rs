@@ -3,9 +3,8 @@
 use anyhow::{Result, Context};
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::io::{self, Read, Write};
 use crate::algorithm::{DeltaAlgorithm, Match};
-use crate::file_list::{generate_file_list, FileInfo, FileOperation, compare_file_lists_with_roots};
+use crate::file_list::{generate_file_list, FileOperation, compare_file_lists_with_roots};
 use crate::progress::SyncProgress;
 use crate::options::SyncOptions;
 
@@ -136,8 +135,7 @@ fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
         .filter(|m| matches!(m, Match::Block { .. }))
         .count();
     
-    println!("  Transferred {} bytes ({} literal, {} block matches)", 
-             literal_bytes, literal_bytes, block_matches);
+    println!("  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)");
     
     Ok(())
 }

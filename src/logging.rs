@@ -3,7 +3,6 @@
 use anyhow::Result;
 use std::fs::File;
 use std::io::{Write, BufWriter};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,14 +49,14 @@ impl SyncLogger {
     /// Log a message to both console and file (if configured)
     pub fn log(&self, message: &str) {
         // Always print to console
-        println!("{}", message);
+        println!("{message}");
 
         // Also write to log file if configured
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
                 let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                if let Err(e) = writeln!(writer, "[{}] {}", timestamp, message) {
-                    eprintln!("Warning: Failed to write to log file: {}", e);
+                if let Err(e) = writeln!(writer, "[{timestamp}] {message}") {
+                    eprintln!("Warning: Failed to write to log file: {e}");
                 }
                 // Flush immediately to ensure log is written
                 let _ = writer.flush();
@@ -67,14 +66,14 @@ impl SyncLogger {
 
     /// Log an error message
     pub fn log_error(&self, error: &str) {
-        let message = format!("ERROR: {}", error);
-        eprintln!("{}", message);
+        let message = format!("ERROR: {error}");
+        eprintln!("{message}");
 
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
                 let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                if let Err(e) = writeln!(writer, "[{}] {}", timestamp, message) {
-                    eprintln!("Warning: Failed to write to log file: {}", e);
+                if let Err(e) = writeln!(writer, "[{timestamp}] {message}") {
+                    eprintln!("Warning: Failed to write to log file: {e}");
                 }
                 let _ = writer.flush();
             }
@@ -193,11 +192,11 @@ fn format_duration(duration: Duration) -> String {
     let seconds = total_secs % 60;
 
     if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
+        format!("{hours}h {minutes}m {seconds}s")
     } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
+        format!("{minutes}m {seconds}s")
     } else {
-        format!("{}s", seconds)
+        format!("{seconds}s")
     }
 }
 
@@ -210,7 +209,7 @@ fn format_transfer_rate(bytes_per_sec: f64) -> String {
     } else if bytes_per_sec >= 1_000.0 {
         format!("{:.2} KB/s", bytes_per_sec / 1_000.0)
     } else {
-        format!("{:.0} B/s", bytes_per_sec)
+        format!("{bytes_per_sec:.0} B/s")
     }
 }
 
@@ -239,7 +238,7 @@ mod tests {
         logger.initialize_progress(100, 1000000);
         assert_eq!(logger.total_files, 100);
         assert_eq!(logger.total_bytes, 1000000);
-        assert_eq!(logger.show_eta, true);
+        assert!(logger.show_eta);
         Ok(())
     }
 }

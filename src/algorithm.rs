@@ -18,6 +18,12 @@ pub struct DeltaAlgorithm {
     compression_config: Option<CompressionConfig>,
 }
 
+impl Default for DeltaAlgorithm {
+    fn default() -> Self {
+        Self::new(DEFAULT_BLOCK_SIZE)
+    }
+}
+
 impl DeltaAlgorithm {
     pub fn new(block_size: usize) -> Self {
         Self { 
@@ -25,10 +31,6 @@ impl DeltaAlgorithm {
             checksum_type: ChecksumType::default(),
             compression_config: None,
         }
-    }
-    
-    pub fn default() -> Self {
-        Self::new(DEFAULT_BLOCK_SIZE)
     }
     
     pub fn with_checksum_type(mut self, checksum_type: ChecksumType) -> Self {

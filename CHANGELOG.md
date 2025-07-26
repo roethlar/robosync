@@ -5,6 +5,58 @@ All notable changes to RoboSync will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-07-25
+
+### Added
+- Multi-level verbosity system:
+  - `-v` shows operation preview before starting, then displays progress bar
+  - `-vv` shows detailed file-by-file operations without progress bar
+- `--confirm` flag for operation confirmation:
+  - Shows pending operation summary (counts only)
+  - Prompts user with "Continue? Y/n" before proceeding
+  - Works with verbosity levels appropriately
+- Live scanning progress during file analysis phase
+- Cargo-style sticky progress bars that stay at bottom while output scrolls above
+- Dynamic OS-based thread limits with `get_max_thread_count()`:
+  - Linux: Based on ulimit file descriptor limits
+  - macOS/BSD: 64 threads max (system limitations)
+  - Windows: 256 threads default
+- Archive mode (`-a`) now properly sets all metadata preservation flags (DATSOU)
+- Safety warning for dangerous flag combinations (e.g., `--mov` with `--mir`)
+
+### Changed
+- Upgraded indicatif from 0.17 to 0.18.0 for improved MultiProgress support
+- Progress bars now work correctly with verbose mode
+- Confirmation mode now shows summary counts instead of full file list for better UX with large file counts
+- Archive mode now correctly sets copy flags to DATSOU for full metadata preservation
+- Improved help text to warn about data loss risks with `--mov` and `--mir` combination
+
+### Fixed
+- Progress bars not showing during file analysis with verbose flag
+- O(n²) performance bottleneck in confirmation counting causing multi-minute delays with 100k+ files
+- O(n*m) bottleneck in byte calculation for large file sets
+- Duplicate delete operations causing metadata errors in mirror/purge mode
+- Progress bar clearing issues with MultiProgress and verbose output
+- Empty `SyncStats::add_bytes_transferred()` method now properly tracks transferred bytes
+- Archive mode not setting proper copy flags
+- 48 compiler warnings reduced to 21 (remaining are dead code warnings)
+
+### Performance
+- Optimized file lookup from O(n) linear search to O(1) HashMap lookup
+- Significantly improved performance with large file counts (100k+ files)
+- Better memory efficiency during file analysis phase
+- Tested performance with network shares: maintains efficiency despite network latency
+
+## [0.5.0] - 2025-01-24
+
+### Added
+- Symlink support with proper metadata preservation
+- Cross-platform symlink handling for Windows/Unix
+- Compress option `-Z` as alias for `-z/--compress`
+
+### Changed
+- Major version bump to reflect stability and feature completeness
+
 ## [0.1.1] - 2025-01-24
 
 ### Fixed
@@ -51,5 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real-time progress bars
 - Verbose output mode
 
+[0.6.0]: https://github.com/yourusername/robosync/releases/tag/v0.6.0
+[0.5.0]: https://github.com/yourusername/robosync/releases/tag/v0.5.0
 [0.1.1]: https://github.com/yourusername/robosync/releases/tag/v0.1.1
 [0.1.0]: https://github.com/yourusername/robosync/releases/tag/v0.1.0

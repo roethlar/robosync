@@ -5,17 +5,14 @@ use std::io::{Read, Write};
 
 /// Compression algorithms supported
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum CompressionType {
     None,
+    #[default]
     Zstd,
     Lz4,
 }
 
-impl Default for CompressionType {
-    fn default() -> Self {
-        CompressionType::Zstd
-    }
-}
 
 /// Compression level settings
 #[derive(Debug, Clone, Copy)]

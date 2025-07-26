@@ -25,6 +25,8 @@ Cargo.lock
 *.log
 test-output/
 tmp/
+sync-test/
+test-data/
 
 # Benchmarks
 benches/target/
@@ -35,7 +37,3 @@ docs/build/
 # OS specific
 Thumbs.db
 .DS_Store
-
-# Project specific
-sync-test/
-test-data/

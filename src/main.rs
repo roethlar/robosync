@@ -18,6 +18,96 @@ use parallel_sync::{ParallelSyncer, ParallelSyncConfig};
 use options::SyncOptions;
 use compression::CompressionConfig;
 
+/// Get the maximum safe thread count based on OS file handle limits
+fn get_max_thread_count() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS has more restrictive limits, typically 256-1024 file descriptors
+        // We use 64 as a safe default that works reliably
+        64
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows has different handle limits, but 128 works well in practice
+        128
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Linux can handle more, check the actual limit
+        use std::process::Command;
+        
+        // Try to get the soft limit for file descriptors
+        if let Ok(output) = Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -n")
+            .output()
+        {
+            if let Ok(limit_str) = String::from_utf8(output.stdout) {
+                if let Ok(limit) = limit_str.trim().parse::<usize>() {
+                    // Use 1/4 of the file descriptor limit as a safe maximum
+                    // This leaves room for other file operations
+                    return (limit / 4).clamp(64, 512);
+                }
+            }
+        }
+        // Default to 256 if we can't determine the limit
+        256
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        // FreeBSD typically has good file descriptor limits
+        // Check the actual limit similar to Linux
+        use std::process::Command;
+        
+        if let Ok(output) = Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -n")
+            .output()
+        {
+            if let Ok(limit_str) = String::from_utf8(output.stdout) {
+                if let Ok(limit) = limit_str.trim().parse::<usize>() {
+                    return (limit / 4).clamp(64, 256);
+                }
+            }
+        }
+        128
+    }
+    #[cfg(target_os = "openbsd")]
+    {
+        // OpenBSD has more conservative limits by default
+        64
+    }
+    #[cfg(target_os = "netbsd")]
+    {
+        // NetBSD similar to FreeBSD
+        128
+    }
+    #[cfg(target_os = "dragonfly")]
+    {
+        // DragonFly BSD
+        128
+    }
+    #[cfg(target_os = "solaris")]
+    {
+        // Solaris/illumos typically have good limits
+        256
+    }
+    #[cfg(not(any(
+        target_os = "macos", 
+        target_os = "windows", 
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "solaris"
+    )))]
+    {
+        // Conservative default for other systems
+        64
+    }
+}
+
 fn main() -> Result<()> {
     let matches = Command::new("RoboSync")
         .version(env!("CARGO_PKG_VERSION"))
@@ -72,7 +162,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("move-files")
                 .long("mov")
-                .help("Move files (delete source after successful copy)")
+                .help("Move files (delete source after successful copy). WARNING: If sync is interrupted and restarted, already moved files will be lost!")
                 .action(clap::ArgAction::SetTrue)
         )
         
@@ -253,7 +343,7 @@ fn main() -> Result<()> {
     let compress = matches.get_flag("compress");
     let sequential = matches.get_flag("sequential");
     let parallel = !sequential;
-    let verbose = matches.get_count("verbose") as u8;
+    let verbose = matches.get_count("verbose");
     let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
     let no_progress = matches.get_flag("no-progress");
@@ -272,12 +362,10 @@ fn main() -> Result<()> {
     
     // File filtering
     let exclude_files: Vec<String> = matches.get_many::<String>("exclude-files")
-        .unwrap_or_default()
-        .map(|s| s.clone())
+        .unwrap_or_default().cloned()
         .collect();
     let exclude_dirs: Vec<String> = matches.get_many::<String>("exclude-dirs")
-        .unwrap_or_default()
-        .map(|s| s.clone())
+        .unwrap_or_default().cloned()
         .collect();
     let min_size = matches.get_one::<u64>("min-size").copied();
     let max_size = matches.get_one::<u64>("max-size").copied();
@@ -293,10 +381,11 @@ fn main() -> Result<()> {
     let block_size = matches.get_one::<usize>("block-size").copied()
         .unwrap_or(1024);
 
-    // Validate thread count to avoid system limits
-    if threads > 64 {
-        eprintln!("Error: Maximum thread count is 64 to avoid system file handle limits.");
-        eprintln!("Requested: {}, Maximum allowed: 64", threads);
+    // Validate thread count based on OS limits
+    let max_threads = get_max_thread_count();
+    if threads > max_threads {
+        eprintln!("Error: Maximum thread count is {max_threads} to avoid system file handle limits.");
+        eprintln!("Requested: {threads}, Maximum allowed: {max_threads}");
         std::process::exit(1);
     }
 
@@ -321,8 +410,8 @@ fn main() -> Result<()> {
     }
     
     if parallel && !dry_run {
-        println!("Threads: {}", threads);
-        println!("Block size: {} bytes", block_size);
+        println!("Threads: {threads} (max allowed: {max_threads})");
+        println!("Block size: {block_size} bytes");
     }
     
     // Show active options
@@ -330,7 +419,7 @@ fn main() -> Result<()> {
     if recursive { options.push("recursive"); }
     if purge { options.push("purge"); }
     if mirror { options.push("mirror"); }
-    let verbose_str = format!("verbose={}", verbose);
+    let verbose_str = format!("verbose={verbose}");
     if verbose > 0 { options.push(&verbose_str); }
     if confirm { options.push("confirm"); }
     if compress { options.push("compress"); }
@@ -344,14 +433,21 @@ fn main() -> Result<()> {
         println!("Options: {}", options.join(", "));
     }
     
-    if copy_all {
+    if copy_all || archive {
         println!("Copy flags: DATSOU (all)");
     } else {
-        println!("Copy flags: {}", copy_flags);
+        println!("Copy flags: {copy_flags}");
     }
     
     if retry_count > 0 {
-        println!("Retry: {} retries, {} seconds wait", retry_count, retry_wait);
+        println!("Retry: {retry_count} retries, {retry_wait} seconds wait");
+    }
+
+    // Warn about dangerous combinations
+    if move_files && mirror {
+        eprintln!("\nWARNING: Using --mov with --mir is dangerous!");
+        eprintln!("If the sync is interrupted, source files already moved will be lost.");
+        eprintln!("Consider using --mir without --mov for safety.\n");
     }
 
     // Create sync options struct
@@ -368,7 +464,7 @@ fn main() -> Result<()> {
         exclude_dirs,
         min_size,
         max_size,
-        copy_flags: if copy_all { "DATSOU".to_string() } else { copy_flags.clone() },
+        copy_flags: if copy_all || archive { "DATSOU".to_string() } else { copy_flags.clone() },
         log_file: log_file.cloned(),
         compress,
         compression_config: if compress { CompressionConfig::balanced() } else { CompressionConfig::default() },
@@ -395,4 +491,81 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_max_thread_count_returns_valid_range() {
+        let max_threads = get_max_thread_count();
+        
+        // Should return a reasonable number
+        assert!(max_threads >= 16, "Max threads should be at least 16, got {}", max_threads);
+        assert!(max_threads <= 512, "Max threads should be at most 512, got {}", max_threads);
+        
+        // Should be a power-friendly number for efficiency
+        assert!(max_threads % 8 == 0 || max_threads == 64 || max_threads == 128 || max_threads == 256,
+            "Max threads {} should be divisible by 8 or a common power", max_threads);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_get_max_thread_count_linux() {
+        let max_threads = get_max_thread_count();
+        
+        // Linux should return between 64 and 512
+        assert!(max_threads >= 64);
+        assert!(max_threads <= 512);
+        
+        // Try to verify against actual ulimit
+        if let Ok(output) = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -n")
+            .output()
+        {
+            if let Ok(limit_str) = String::from_utf8(output.stdout) {
+                if let Ok(limit) = limit_str.trim().parse::<usize>() {
+                    let expected = (limit / 4).clamp(64, 512);
+                    assert_eq!(max_threads, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_get_max_thread_count_macos() {
+        let max_threads = get_max_thread_count();
+        assert_eq!(max_threads, 64);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_get_max_thread_count_windows() {
+        let max_threads = get_max_thread_count();
+        assert_eq!(max_threads, 128);
+    }
+
+    #[test]
+    #[cfg(target_os = "freebsd")]
+    fn test_get_max_thread_count_freebsd() {
+        let max_threads = get_max_thread_count();
+        
+        // FreeBSD should return between 64 and 256
+        assert!(max_threads >= 64);
+        assert!(max_threads <= 256);
+    }
+
+    #[test]
+    fn test_thread_count_consistency() {
+        // Call multiple times to ensure it returns consistent results
+        let first_call = get_max_thread_count();
+        let second_call = get_max_thread_count();
+        let third_call = get_max_thread_count();
+        
+        assert_eq!(first_call, second_call);
+        assert_eq!(second_call, third_call);
+    }
 }

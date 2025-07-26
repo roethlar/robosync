@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct SyncProgress {
     total_files: u64,
     completed_files: u64,
+    #[allow(dead_code)]
     total_bytes: u64,
     transferred_bytes: AtomicU64,
     start_time: Instant,
@@ -63,8 +64,7 @@ impl SyncProgress {
                 let throughput = (bytes_total as f64 / elapsed) as u64;
                 pb.set_message(format!("{}/s", indicatif::HumanBytes(throughput)));
             }
-        } else {
-        }
+        } 
     }
     
     pub fn update_bytes_transferred(&mut self, bytes: u64) {
@@ -95,7 +95,7 @@ impl SyncProgress {
             println!();
             println!("Synchronization statistics:");
             println!("  Files processed: {}/{}", self.completed_files, self.total_files);
-            println!("  Bytes transferred: {} bytes", transferred_bytes);
+            println!("  Bytes transferred: {transferred_bytes} bytes");
             println!("  Time elapsed: {:.2}s", elapsed.as_secs_f64());
             println!("  Transfer rate: {:.2} MB/s", rate / 1_000_000.0);
         }

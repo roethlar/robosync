@@ -6,7 +6,7 @@ use std::fs;
 use std::time::SystemTime;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 
 /// Copy flags that determine what metadata to copy
 #[derive(Debug, Clone)]
@@ -17,6 +17,12 @@ pub struct CopyFlags {
     pub security: bool,    // S - Security (permissions)
     pub owner: bool,       // O - Owner info
     pub auditing: bool,    // U - Auditing info
+}
+
+impl Default for CopyFlags {
+    fn default() -> Self {
+        Self::from_string("DAT")
+    }
 }
 
 impl CopyFlags {
@@ -31,11 +37,6 @@ impl CopyFlags {
             owner: flags_upper.contains('O'),
             auditing: flags_upper.contains('U'),
         }
-    }
-
-    /// Get default copy flags (DAT - Data, Attributes, Timestamps)
-    pub fn default() -> Self {
-        Self::from_string("DAT")
     }
 
     /// Get all copy flags (DATSOU)
@@ -171,7 +172,7 @@ fn create_symlink_cross_platform(target: &Path, destination: &Path) -> Result<()
 /// Copy symlink ownership (Unix only)
 #[cfg(unix)]
 fn copy_symlink_ownership(
-    source: &Path,
+    _source: &Path,
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {
@@ -247,7 +248,7 @@ pub fn copy_attributes(
 /// Copy file ownership (Unix only)
 #[cfg(unix)]
 pub fn copy_ownership(
-    source: &Path,
+    _source: &Path,
     destination: &Path,
     source_metadata: &fs::Metadata,
 ) -> Result<()> {

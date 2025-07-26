@@ -13,7 +13,7 @@ fn create_test_files(dir: &Path, num_files: usize, file_size: usize) -> Result<(
     let content = vec![b'A'; file_size];
     
     for i in 0..num_files {
-        let file_path = dir.join(format!("file_{}.txt", i));
+        let file_path = dir.join(format!("file_{i}.txt"));
         fs::write(&file_path, &content)?;
     }
     
@@ -28,7 +28,7 @@ fn bench_file_list_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("file_list_generation");
     
     for &num_files in &[10, 100, 1000] {
-        let test_dir = base_path.join(format!("test_{}", num_files));
+        let test_dir = base_path.join(format!("test_{num_files}"));
         create_test_files(&test_dir, num_files, 1024).unwrap(); // 1KB files
         
         group.throughput(Throughput::Elements(num_files as u64));
@@ -55,7 +55,7 @@ fn bench_checksum_calculation(c: &mut Criterion) {
     let mut group = c.benchmark_group("checksum_calculation");
     
     for &file_size in &[1024, 10_240, 102_400, 1_024_000] { // 1KB, 10KB, 100KB, 1MB
-        let test_dir = base_path.join(format!("checksum_{}", file_size));
+        let test_dir = base_path.join(format!("checksum_{file_size}"));
         create_test_files(&test_dir, 10, file_size).unwrap(); // 10 files of each size
         
         group.throughput(Throughput::Bytes((file_size * 10) as u64));
@@ -168,17 +168,17 @@ fn bench_directory_scanning(c: &mut Criterion) {
     
     // Create nested directory structure
     for depth in &[1, 3, 5] {
-        let test_dir = base_path.join(format!("depth_{}", depth));
+        let test_dir = base_path.join(format!("depth_{depth}"));
         let mut current_dir = test_dir.clone();
         
         // Create nested directories
         for d in 0..*depth {
-            current_dir = current_dir.join(format!("level_{}", d));
+            current_dir = current_dir.join(format!("level_{d}"));
             fs::create_dir_all(&current_dir).unwrap();
             
             // Add some files at each level
             for i in 0..10 {
-                let file_path = current_dir.join(format!("file_{}_{}.txt", d, i));
+                let file_path = current_dir.join(format!("file_{d}_{i}.txt"));
                 fs::write(&file_path, b"test content").unwrap();
             }
         }
