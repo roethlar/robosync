@@ -119,7 +119,7 @@ fn copy_file_with_metadata_internal(
                 w.push(warning.to_string());
             }
         } else {
-            eprintln!("{}", warning);
+            eprintln!("{warning}");
         }
     }
 
