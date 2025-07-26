@@ -65,6 +65,7 @@ impl SyncLogger {
     }
 
     /// Log an error message
+    #[allow(dead_code)]
     pub fn log_error(&self, error: &str) {
         let message = format!("ERROR: {error}");
         eprintln!("{message}");
@@ -189,6 +190,7 @@ impl SyncLogger {
     }
 
     /// Flush and close the log file
+    #[allow(dead_code)]
     pub fn close(&self) {
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {

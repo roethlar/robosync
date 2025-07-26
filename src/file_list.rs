@@ -490,6 +490,7 @@ where
 }
 
 /// Compare two file lists to find differences (legacy function for backward compatibility)
+#[allow(dead_code)]
 pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileOperation> {
     // Use default options for backward compatibility
     let default_options = SyncOptions::default();
@@ -497,6 +498,7 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
 }
 
 /// Compare two file lists to find differences with options
+#[allow(dead_code)]
 pub fn compare_file_lists_with_options(
     source: &[FileInfo],
     target: &[FileInfo],

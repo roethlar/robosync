@@ -82,6 +82,7 @@ where
 }
 
 /// Check if an error is retryable
+#[allow(dead_code)]
 pub fn is_retryable_error(error: &anyhow::Error) -> bool {
     // Check the error chain for specific error types
     let error_string = error.to_string().to_lowercase();

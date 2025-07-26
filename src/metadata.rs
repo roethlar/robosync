@@ -40,6 +40,7 @@ impl CopyFlags {
     }
 
     /// Get all copy flags (DATSOU)
+    #[allow(dead_code)]
     pub fn all() -> Self {
         Self::from_string("DATSOU")
     }

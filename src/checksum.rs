@@ -4,6 +4,7 @@ use anyhow::Result;
 
 /// Available checksum algorithms
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ChecksumType {
     Blake3,
     XxHash3,
@@ -97,11 +98,13 @@ impl RollingChecksum {
     }
 
     /// Get s1 component
+    #[allow(dead_code)]
     pub fn s1(&self) -> u32 {
         self.s1
     }
 
     /// Get s2 component  
+    #[allow(dead_code)]
     pub fn s2(&self) -> u32 {
         self.s2
     }

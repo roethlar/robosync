@@ -33,6 +33,7 @@ impl DeltaAlgorithm {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_checksum_type(mut self, checksum_type: ChecksumType) -> Self {
         self.checksum_type = checksum_type;
         self
@@ -222,6 +223,7 @@ pub struct BlockChecksum {
 
 /// Represents a match between source and target
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Match {
     /// Block matches existing data at given offset  
     Block {

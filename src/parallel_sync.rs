@@ -28,10 +28,12 @@ pub struct ParallelSyncConfig {
     /// Number of worker threads for file processing
     pub worker_threads: usize,
     /// Number of I/O threads for reading/writing
+    #[allow(dead_code)]
     pub io_threads: usize,
     /// Block size for delta algorithm
     pub block_size: usize,
     /// Maximum number of files to process in parallel
+    #[allow(dead_code)]
     pub max_parallel_files: usize,
 }
 
@@ -1838,9 +1840,12 @@ impl ParallelSyncer {
 /// Statistics for synchronization performance
 #[derive(Debug, Default)]
 pub struct SyncStats {
+    #[allow(dead_code)]
     pub files_processed: AtomicU64,
     pub bytes_transferred: AtomicU64,
+    #[allow(dead_code)]
     pub blocks_matched: AtomicU64,
+    #[allow(dead_code)]
     pub elapsed_time: std::time::Duration,
     pub warnings: Arc<Mutex<Vec<String>>>,
 }

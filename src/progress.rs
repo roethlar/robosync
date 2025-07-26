@@ -71,6 +71,7 @@ impl SyncProgress {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_bytes_transferred(&mut self, bytes: u64) {
         self.transferred_bytes.fetch_add(bytes, Ordering::Relaxed);
 

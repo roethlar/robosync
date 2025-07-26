@@ -5,6 +5,7 @@ use crate::compression::CompressionConfig;
 /// Synchronization options parsed from command line
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
+    #[allow(dead_code)]
     pub recursive: bool,
     pub purge: bool,
     pub mirror: bool,

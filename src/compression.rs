@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 
 /// Compression algorithms supported
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub enum CompressionType {
     None,
     #[default]
@@ -30,6 +31,7 @@ impl Default for CompressionConfig {
 
 impl CompressionConfig {
     /// Create config optimized for speed
+    #[allow(dead_code)]
     pub fn fast() -> Self {
         Self {
             algorithm: CompressionType::Lz4,
@@ -38,6 +40,7 @@ impl CompressionConfig {
     }
 
     /// Create config optimized for compression ratio
+    #[allow(dead_code)]
     pub fn best() -> Self {
         Self {
             algorithm: CompressionType::Zstd,
@@ -99,16 +102,19 @@ pub fn compress_literal_data(literal_data: &[u8], config: CompressionConfig) -> 
 }
 
 /// Streaming compressor for large files
+#[allow(dead_code)]
 pub struct StreamingCompressor {
     config: CompressionConfig,
 }
 
 impl StreamingCompressor {
+    #[allow(dead_code)]
     pub fn new(config: CompressionConfig) -> Self {
         Self { config }
     }
 
     /// Compress a stream of data
+    #[allow(dead_code)]
     pub fn compress_stream<R: Read, W: Write>(&self, mut reader: R, mut writer: W) -> Result<u64> {
         match self.config.algorithm {
             CompressionType::None => std::io::copy(&mut reader, &mut writer)
@@ -163,16 +169,19 @@ impl StreamingCompressor {
 }
 
 /// Streaming decompressor for large files
+#[allow(dead_code)]
 pub struct StreamingDecompressor {
     algorithm: CompressionType,
 }
 
 impl StreamingDecompressor {
+    #[allow(dead_code)]
     pub fn new(algorithm: CompressionType) -> Self {
         Self { algorithm }
     }
 
     /// Decompress a stream of data
+    #[allow(dead_code)]
     pub fn decompress_stream<R: Read, W: Write>(
         &self,
         mut reader: R,
@@ -227,6 +236,7 @@ impl StreamingDecompressor {
 }
 
 /// Calculate compression ratio as a percentage
+#[allow(dead_code)]
 pub fn compression_ratio(original_size: u64, compressed_size: u64) -> f64 {
     if original_size == 0 {
         return 0.0;
