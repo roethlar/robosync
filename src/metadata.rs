@@ -51,6 +51,26 @@ pub fn copy_file_with_metadata(
     destination: &Path,
     flags: &CopyFlags,
 ) -> Result<u64> {
+    copy_file_with_metadata_internal(source, destination, flags, None)
+}
+
+/// Copy a file with specified metadata preservation, with optional warnings collector
+pub fn copy_file_with_metadata_with_warnings(
+    source: &Path,
+    destination: &Path,
+    flags: &CopyFlags,
+    warnings: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Result<u64> {
+    copy_file_with_metadata_internal(source, destination, flags, Some(warnings))
+}
+
+/// Internal implementation for copy_file_with_metadata
+fn copy_file_with_metadata_internal(
+    source: &Path,
+    destination: &Path,
+    flags: &CopyFlags,
+    warnings: Option<&std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<u64> {
     // Check if source is a symlink - if so, use symlink-specific handling
     let source_metadata = fs::symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
@@ -93,7 +113,14 @@ pub fn copy_file_with_metadata(
     // Auditing info (U flag) is typically not supported on most filesystems
     // We'll just log that it was requested but not implemented
     if flags.auditing {
-        eprintln!("Warning: Auditing info copying (U flag) not supported on this platform");
+        let warning = "Warning: Auditing info copying (U flag) not supported on this platform";
+        if let Some(warnings) = warnings {
+            if let Ok(mut w) = warnings.lock() {
+                w.push(warning.to_string());
+            }
+        } else {
+            eprintln!("{}", warning);
+        }
     }
 
     Ok(bytes_copied)

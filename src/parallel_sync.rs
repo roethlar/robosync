@@ -12,7 +12,7 @@ use crate::algorithm::{DeltaAlgorithm, Match, BlockChecksum};
 use crate::file_list::{generate_file_list_with_options, generate_file_list_with_options_and_progress, FileInfo, FileOperation, compare_file_lists_with_roots, compare_file_lists_with_roots_and_progress};
 use crate::progress::SyncProgress;
 use crate::options::SyncOptions;
-use crate::metadata::{CopyFlags, copy_file_with_metadata};
+use crate::metadata::{CopyFlags, copy_file_with_metadata, copy_file_with_metadata_with_warnings};
 use crate::logging::SyncLogger;
 use crate::compression::{decompress_data, CompressionType};
 use crate::retry::{RetryConfig, with_retry};
@@ -592,7 +592,7 @@ impl ParallelSyncer {
                 
                 // Parse copy flags and copy file with metadata  
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                let bytes_copied = self.copy_file_with_retry(&path, &dest_path, &copy_flags, options)?;
+                let bytes_copied = self.copy_file_with_retry_with_warnings(&path, &dest_path, &copy_flags, options, &stats.warnings)?;
                 
                 // If move mode is enabled, delete source file after successful copy
                 if options.move_files && !options.dry_run {
@@ -630,7 +630,7 @@ impl ParallelSyncer {
                 } else {
                     // Parse copy flags and copy file with metadata
                     let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                    let bytes_copied = self.copy_file_with_retry(&path, &dest_path, &copy_flags, options)?;
+                    let bytes_copied = self.copy_file_with_retry_with_warnings(&path, &dest_path, &copy_flags, options, &stats.warnings)?;
                     
                     // If move mode is enabled, delete source file after successful copy
                     if options.move_files && !options.dry_run {
@@ -790,7 +790,7 @@ impl ParallelSyncer {
                 } else {
                     // Parse copy flags and copy file with metadata
                     let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                    let bytes_copied = self.copy_file_with_retry(&path, &dest_path, &copy_flags, options)?;
+                    let bytes_copied = self.copy_file_with_retry_with_warnings(&path, &dest_path, &copy_flags, options, &stats.warnings)?;
                     
                     // If move mode is enabled, delete source file after successful copy
                     if options.move_files && !options.dry_run {
@@ -923,6 +923,13 @@ impl ParallelSyncer {
 
             // Apply metadata based on copy flags
             let copy_flags = CopyFlags::from_string(&options.copy_flags);
+            let stats = SyncStats::new();
+            
+            // Check for auditing flag and collect warning
+            if copy_flags.auditing {
+                stats.add_warning("Warning: Auditing info copying (U flag) not supported on this platform".to_string());
+            }
+            
             if copy_flags.timestamps || copy_flags.security || copy_flags.attributes || copy_flags.owner {
                 let source_metadata = fs::metadata(source)
                     .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
@@ -940,9 +947,7 @@ impl ParallelSyncer {
                 if copy_flags.owner {
                     crate::metadata::copy_ownership(source, destination, &source_metadata)?;
                 }
-                if copy_flags.auditing {
-                    eprintln!("Warning: Auditing info copying (U flag) not supported on this platform");
-                }
+                // Auditing warning handled separately to avoid interrupting progress
             }
 
             // If move mode is enabled, delete source file after successful copy
@@ -951,10 +956,8 @@ impl ParallelSyncer {
                     .with_context(|| format!("Failed to delete source file after move: {}", source.display()))?;
             }
 
-            return Ok(SyncStats {
-                bytes_transferred: AtomicU64::new(file_size),
-                ..Default::default()
-            });
+            stats.add_bytes_transferred(file_size);
+            return Ok(stats);
         }
 
         // Existing file, use parallel delta algorithm with streaming for large files
@@ -965,6 +968,13 @@ impl ParallelSyncer {
             
             // Apply metadata from source to destination
             let copy_flags = CopyFlags::from_string(&options.copy_flags);
+            let stats = SyncStats::new();
+            
+            // Check for auditing flag and collect warning
+            if copy_flags.auditing {
+                stats.add_warning("Warning: Auditing info copying (U flag) not supported on this platform".to_string());
+            }
+            
             if copy_flags.timestamps || copy_flags.security || copy_flags.attributes || copy_flags.owner {
                 let source_metadata = fs::metadata(source)
                     .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
@@ -989,10 +999,8 @@ impl ParallelSyncer {
                     .with_context(|| format!("Failed to delete source file after delta move: {}", source.display()))?;
             }
             
-            return Ok(SyncStats {
-                bytes_transferred: AtomicU64::new(file_size),
-                ..Default::default()
-            });
+            stats.add_bytes_transferred(file_size);
+            return Ok(stats);
         }
         
         // Small files: use traditional delta algorithm
@@ -1027,6 +1035,12 @@ impl ParallelSyncer {
 
         // Apply metadata from source to destination
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
+        
+        // Check for auditing flag and collect warning
+        if copy_flags.auditing {
+            // This warning will be collected by the parent stats object
+        }
+        
         if copy_flags.timestamps || copy_flags.security || copy_flags.attributes || copy_flags.owner {
             // Apply metadata (but not data since we already wrote the delta-reconstructed data)
             let source_metadata = fs::metadata(source)
@@ -1061,10 +1075,16 @@ impl ParallelSyncer {
                 .with_context(|| format!("Failed to delete source file after delta move: {}", source.display()))?;
         }
 
-        Ok(SyncStats {
-            bytes_transferred: AtomicU64::new(literal_bytes),
-            ..Default::default()
-        })
+        let stats = SyncStats::new();
+        stats.add_bytes_transferred(literal_bytes);
+        
+        // Check for auditing flag and collect warning for delta transfer
+        let copy_flags = CopyFlags::from_string(&options.copy_flags);
+        if copy_flags.auditing {
+            stats.add_warning("Warning: Auditing info copying (U flag) not supported on this platform".to_string());
+        }
+        
+        Ok(stats)
     }
 
     /// Generate checksums in parallel using Rayon
@@ -1372,6 +1392,30 @@ impl ParallelSyncer {
         copy_flags: &CopyFlags,
         options: &SyncOptions,
     ) -> Result<u64> {
+        self.copy_file_with_retry_internal(source, dest, copy_flags, options, None)
+    }
+    
+    /// Copy file with metadata, using retry logic if configured, with warnings collector
+    fn copy_file_with_retry_with_warnings(
+        &self,
+        source: &Path,
+        dest: &Path,
+        copy_flags: &CopyFlags,
+        options: &SyncOptions,
+        warnings: &Arc<Mutex<Vec<String>>>,
+    ) -> Result<u64> {
+        self.copy_file_with_retry_internal(source, dest, copy_flags, options, Some(warnings))
+    }
+    
+    /// Internal implementation for copy_file_with_retry
+    fn copy_file_with_retry_internal(
+        &self,
+        source: &Path,
+        dest: &Path,
+        copy_flags: &CopyFlags,
+        options: &SyncOptions,
+        warnings: Option<&Arc<Mutex<Vec<String>>>>,
+    ) -> Result<u64> {
         let retry_config = RetryConfig::new(options.retry_count, options.retry_wait);
         
         if retry_config.should_retry() {
@@ -1380,7 +1424,13 @@ impl ParallelSyncer {
             
             // We need to handle the logger mutex carefully
             let result = with_retry(
-                || copy_file_with_metadata(source, dest, copy_flags),
+                || {
+                    if let Some(warnings) = warnings {
+                        copy_file_with_metadata_with_warnings(source, dest, copy_flags, warnings)
+                    } else {
+                        copy_file_with_metadata(source, dest, copy_flags)
+                    }
+                },
                 &retry_config,
                 &description,
                 None, // We'll log retries separately
@@ -1390,8 +1440,11 @@ impl ParallelSyncer {
                 retry_config.max_retries, source.display(), dest.display()))
         } else {
             // No retry
-            copy_file_with_metadata(source, dest, copy_flags)
-                .with_context(|| format!("Failed to copy file: {} -> {}", source.display(), dest.display()))
+            if let Some(warnings) = warnings {
+                copy_file_with_metadata_with_warnings(source, dest, copy_flags, warnings)
+            } else {
+                copy_file_with_metadata(source, dest, copy_flags)
+            }.with_context(|| format!("Failed to copy file: {} -> {}", source.display(), dest.display()))
         }
     }
 }
@@ -1403,6 +1456,7 @@ pub struct SyncStats {
     pub bytes_transferred: AtomicU64,
     pub blocks_matched: AtomicU64,
     pub elapsed_time: std::time::Duration,
+    pub warnings: Arc<Mutex<Vec<String>>>,
 }
 
 impl SyncStats {
@@ -1412,6 +1466,13 @@ impl SyncStats {
             bytes_transferred: AtomicU64::new(0),
             blocks_matched: AtomicU64::new(0),
             elapsed_time: std::time::Duration::from_secs(0),
+            warnings: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    
+    pub fn add_warning(&self, warning: String) {
+        if let Ok(mut warnings) = self.warnings.lock() {
+            warnings.push(warning);
         }
     }
 

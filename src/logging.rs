@@ -172,6 +172,22 @@ impl SyncLogger {
         );
 
         self.log(&summary);
+        
+        // Display any warnings that were collected during sync
+        if let Ok(warnings) = stats.warnings.lock() {
+            if !warnings.is_empty() {
+                // Deduplicate warnings
+                let mut unique_warnings = std::collections::HashSet::new();
+                for warning in warnings.iter() {
+                    unique_warnings.insert(warning.clone());
+                }
+                
+                // Display unique warnings
+                for warning in unique_warnings {
+                    self.log(&warning);
+                }
+            }
+        }
     }
 
     /// Flush and close the log file
