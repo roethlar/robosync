@@ -92,17 +92,52 @@ impl FastFileListGenerator {
         let file_count = AtomicUsize::new(0);
         let last_update = Arc::new(Mutex::new(Instant::now()));
         
+        // Clone exclude_dirs for use in closure
+        let exclude_dirs = options.exclude_dirs.clone();
+        
         // Configure jwalk for optimal performance
         let entries: Result<Vec<FileInfo>, _> = JWalkDir::new(root)
             .parallelism(Parallelism::RayonNewPool(self.config.scan_threads))
             .skip_hidden(false)
             .follow_links(false)
+            .process_read_dir(move |_depth, path, _read_dir_state, children| {
+                // Check if this directory should be excluded
+                if let Some(dir_name) = path.file_name() {
+                    let dir_name_str = dir_name.to_string_lossy();
+                    for pattern in &exclude_dirs {
+                        // Simple pattern matching for directory names
+                        if pattern == &dir_name_str || dir_name_str.contains(pattern) {
+                            // Clear children to prevent traversing into excluded directory
+                            children.clear();
+                            return;
+                        }
+                    }
+                }
+                
+                // Skip permission errors during directory traversal
+                children.retain(|entry| {
+                    if let Err(e) = entry {
+                        if let Some(io_err) = e.io_error() {
+                            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                                // Silently skip permission denied errors
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                });
+            })
             .into_iter()
             .par_bridge()
             .filter_map(|entry| {
                 match entry {
                     Ok(entry) => {
                         let path = entry.path();
+                        
+                        // Skip the root directory itself
+                        if path == root {
+                            return None;
+                        }
                         
                         // Get metadata efficiently
                         let metadata = match entry.metadata() {
@@ -118,7 +153,7 @@ impl FastFileListGenerator {
                         };
                         
                         let file_info = FileInfo {
-                            path,
+                            path: path.clone(),
                             size: metadata.len(),
                             modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                             is_directory: metadata.is_dir(),
@@ -126,6 +161,13 @@ impl FastFileListGenerator {
                             symlink_target,
                             checksum: None,
                         };
+                        
+                        // Debug suspicious paths
+                        if file_info.path.to_string_lossy().contains("/home/michael/Documents/home/") {
+                            eprintln!("JWALK ERROR: Enumerated file with doubled path: {}", file_info.path.display());
+                            eprintln!("  Root: {}", root.display());
+                            eprintln!("  Entry path: {}", path.display());
+                        }
                         
                         // Apply filters
                         if self.should_include_file(&file_info, root, options) {
@@ -152,7 +194,15 @@ impl FastFileListGenerator {
                             None
                         }
                     }
-                    Err(e) => Some(Err(anyhow::anyhow!("Walk error: {}", e))),
+                    Err(e) => {
+                        // Skip permission errors silently
+                        if let Some(io_err) = e.io_error() {
+                            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                                return None;
+                            }
+                        }
+                        Some(Err(anyhow::anyhow!("Walk error: {}", e)))
+                    }
                 }
             })
             .collect();
@@ -201,6 +251,12 @@ impl FastFileListGenerator {
                                 symlink_target,
                                 checksum: None,
                             };
+                            
+                            // Debug suspicious paths
+                            if file_info.path.to_string_lossy().contains("/home/michael/Documents/home/") {
+                                eprintln!("RAYON ERROR: Enumerated file with doubled path: {}", file_info.path.display());
+                                eprintln!("  Root: {}", root.display());
+                            }
                             
                             // Apply filters
                             if self.should_include_file(&file_info, root, options) {
@@ -251,7 +307,15 @@ impl FastFileListGenerator {
             .into_iter()
             .filter_map(|entry| {
                 match entry {
-                    Ok(entry) => Some(entry.path().to_path_buf()),
+                    Ok(entry) => {
+                        let path = entry.path().to_path_buf();
+                        // Skip the root directory itself
+                        if path == root {
+                            None
+                        } else {
+                            Some(path)
+                        }
+                    },
                     Err(_) => None,
                 }
             })
@@ -417,13 +481,56 @@ pub fn compare_file_lists_fast(
             for source_file in chunk {
                 if let Ok(relative_path) = source_file.path.strip_prefix(source_root) {
                     let relative_path = relative_path.to_path_buf();
+                    
+                    // Skip any paths that would create a home directory structure
+                    if relative_path.starts_with("home/") {
+                        eprintln!("WARNING: Skipping file with suspicious path: {} (relative: {})", 
+                            source_file.path.display(), relative_path.display());
+                        continue;
+                    }
 
                     if let Some(target_file) = target_map.get(&relative_path) {
                         // File exists in both source and target
                         chunk_targets.push(relative_path);
 
-                        // Check if update is needed
-                        if !source_file.is_directory && !target_file.is_directory {
+                        // Handle symlinks first
+                        if source_file.is_symlink && target_file.is_symlink {
+                            // Both are symlinks, check if they point to the same target
+                            if source_file.symlink_target != target_file.symlink_target {
+                                if let Some(ref target) = source_file.symlink_target {
+                                    chunk_operations.push(FileOperation::UpdateSymlink {
+                                        path: source_file.path.clone(),
+                                        target: target.clone(),
+                                    });
+                                }
+                            }
+                        } else if source_file.is_symlink && !target_file.is_symlink {
+                            // Source is symlink, target is not - replace with symlink
+                            chunk_operations.push(FileOperation::Delete {
+                                path: target_file.path.clone(),
+                            });
+                            if let Some(ref target) = source_file.symlink_target {
+                                chunk_operations.push(FileOperation::CreateSymlink {
+                                    path: source_file.path.clone(),
+                                    target: target.clone(),
+                                });
+                            }
+                        } else if !source_file.is_symlink && target_file.is_symlink {
+                            // Source is not symlink, target is - replace symlink
+                            chunk_operations.push(FileOperation::Delete {
+                                path: target_file.path.clone(),
+                            });
+                            if source_file.is_directory {
+                                chunk_operations.push(FileOperation::CreateDirectory {
+                                    path: source_file.path.clone(),
+                                });
+                            } else {
+                                chunk_operations.push(FileOperation::Create {
+                                    path: source_file.path.clone(),
+                                });
+                            }
+                        } else if !source_file.is_directory && !target_file.is_directory {
+                            // Both are regular files
                             if needs_update_fast(source_file, target_file, options) {
                                 let use_delta = should_use_delta_fast(source_file, target_file);
                                 chunk_operations.push(FileOperation::Update {
@@ -452,6 +559,13 @@ pub fn compare_file_lists_fast(
                             chunk_operations.push(FileOperation::CreateDirectory {
                                 path: source_file.path.clone(),
                             });
+                        } else if source_file.is_symlink {
+                            if let Some(ref target) = source_file.symlink_target {
+                                chunk_operations.push(FileOperation::CreateSymlink {
+                                    path: source_file.path.clone(),
+                                    target: target.clone(),
+                                });
+                            }
                         } else {
                             chunk_operations.push(FileOperation::Create {
                                 path: source_file.path.clone(),

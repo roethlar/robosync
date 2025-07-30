@@ -1,7 +1,7 @@
 //! Main synchronization logic
 
 use crate::algorithm::{DeltaAlgorithm, Match};
-use crate::file_list::{compare_file_lists_with_roots, generate_file_list, FileOperation};
+use crate::file_list::{compare_file_lists_with_roots, generate_file_list_with_options, FileOperation};
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
 use crate::sync_stats::SyncStats;
@@ -60,7 +60,8 @@ pub fn synchronize(
         sync_single_file(&source, &destination)?;
     } else if source_metadata.is_dir() {
         // Directory synchronization
-        sync_directories(&source, &destination)?;
+        let default_options = SyncOptions::default();
+        sync_directories(&source, &destination, &default_options)?;
     } else {
         return Err(anyhow::anyhow!("Invalid source/destination combination"));
     }
@@ -74,8 +75,69 @@ pub fn synchronize_with_options(
     source: PathBuf,
     destination: PathBuf,
     _threads: usize,
-    options: SyncOptions,
+    mut options: SyncOptions,
 ) -> Result<()> {
+    // Detect destination filesystem capabilities and adjust copy flags if needed
+    let dest_parent = if destination.exists() {
+        destination.clone()
+    } else {
+        destination.parent()
+            .ok_or_else(|| anyhow::anyhow!("Destination has no parent directory"))?
+            .to_path_buf()
+    };
+    
+    if let Ok(capabilities) = crate::metadata::detect_filesystem_capabilities(&dest_parent) {
+        // Debug output
+        // Detected filesystem type and ownership support
+        
+        let original_flags = crate::metadata::CopyFlags::from_string(&options.copy_flags);
+        let filtered_flags = crate::metadata::filter_copy_flags_for_filesystem(&original_flags, &capabilities);
+        
+        // Warn user if flags were filtered
+        let mut filtered_out = Vec::new();
+        if original_flags.owner && !filtered_flags.owner {
+            filtered_out.push("Owner (O)");
+        }
+        if original_flags.security && !filtered_flags.security {
+            filtered_out.push("Security/Permissions (S)");
+        }
+        if original_flags.attributes && !filtered_flags.attributes {
+            filtered_out.push("Extended Attributes (A)");
+        }
+        if original_flags.timestamps && !filtered_flags.timestamps {
+            filtered_out.push("Timestamps (T)");
+        }
+        
+        if !filtered_out.is_empty() {
+            match capabilities.filesystem_type {
+                crate::metadata::FilesystemType::Network => {
+                    println!("Warning: Network filesystem detected. The following copy flags may fail and have been disabled:");
+                },
+                crate::metadata::FilesystemType::Tmpfs => {
+                    println!("Warning: Temporary filesystem detected. The following copy flags may fail and have been disabled:");
+                },
+                _ => {
+                    println!("Warning: Filesystem limitations detected. The following copy flags have been disabled:");
+                }
+            }
+            for flag in &filtered_out {
+                println!("  - {}", flag);
+            }
+            println!("Consider using -copyflags DAT for cross-filesystem copies.");
+        }
+        
+        // Update options with filtered flags
+        let mut new_flags = String::new();
+        if filtered_flags.data { new_flags.push('D'); }
+        if filtered_flags.attributes { new_flags.push('A'); }
+        if filtered_flags.timestamps { new_flags.push('T'); }
+        if filtered_flags.security { new_flags.push('S'); }
+        if filtered_flags.owner { new_flags.push('O'); }
+        // U (auditing) is always filtered out
+        
+        options.copy_flags = new_flags;
+    }
+
     if options.dry_run {
         println!("DRY RUN - would synchronize:");
         println!("  Source: {}", source.display());
@@ -83,9 +145,28 @@ pub fn synchronize_with_options(
         return Ok(());
     }
 
-    // For now, just call the basic synchronize function
-    // TODO: Implement full options support
-    synchronize(source, destination, _threads, options.compress)
+    // Handle different source/destination combinations
+    let source_metadata = fs::metadata(&source)?;
+
+    if source_metadata.is_file() && destination.is_dir() {
+        // Single file to directory
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Source file has no name"))?;
+        let dest_file = destination.join(file_name);
+        sync_single_file(&source, &dest_file)?;
+    } else if source_metadata.is_file() && (!destination.exists() || destination.is_file()) {
+        // Single file to file (new file or existing file)
+        sync_single_file(&source, &destination)?;
+    } else if source_metadata.is_dir() {
+        // Directory synchronization
+        sync_directories(&source, &destination, &options)?;
+    } else {
+        return Err(anyhow::anyhow!("Invalid source/destination combination"));
+    }
+
+    println!("Synchronization completed successfully!");
+    Ok(())
 }
 
 /// Synchronize a single file using delta algorithm
@@ -191,31 +272,30 @@ fn apply_delta(dest_data: &[u8], matches: &[Match]) -> Result<Vec<u8>> {
 }
 
 /// Synchronize directories recursively
-fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
+fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) -> Result<()> {
     println!(
         "Syncing directory: {} -> {}",
         source.display(),
         destination.display()
     );
+    
 
     // Generate file lists
-    let source_files = generate_file_list(source).context("Failed to generate source file list")?;
+    let source_files = generate_file_list_with_options(source, options).context("Failed to generate source file list")?;
 
     let dest_files = if destination.exists() {
-        generate_file_list(destination).context("Failed to generate destination file list")?
+        generate_file_list_with_options(destination, options).context("Failed to generate destination file list")?
     } else {
         Vec::new()
     };
 
     // Compare file lists to determine operations
-    // Use default options for basic sync (no checksum comparison)
-    let default_options = crate::options::SyncOptions::default();
     let operations = compare_file_lists_with_roots(
         &source_files,
         &dest_files,
         source,
         destination,
-        &default_options,
+        options,
     );
 
     let total_files = operations.len() as u64;
@@ -226,6 +306,7 @@ fn sync_directories(source: &Path, destination: &Path) -> Result<()> {
         .sum();
 
     let mut progress = SyncProgress::new(total_files, total_bytes);
+
 
     // Execute operations
     for operation in operations {

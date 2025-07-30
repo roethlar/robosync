@@ -1,7 +1,7 @@
 //! File list generation and management
 
-use crate::options::SyncOptions;
-use anyhow::Result;
+use crate::options::{SyncOptions, SymlinkBehavior};
+use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -24,9 +24,26 @@ pub struct FileInfo {
 pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(root) {
-        let entry = entry?;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                // Skip permission errors
+                if let Some(io_err) = e.io_error() {
+                    if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                        eprintln!("Warning: Skipping inaccessible path: {}", e.path().unwrap_or(Path::new("<unknown>")).display());
+                        continue;
+                    }
+                }
+                return Err(e.into());
+            }
+        };
         let path = entry.path();
+        
+        // Skip the root directory itself if it's the same as the root we're walking
+        if path == root {
+            continue;
+        }
 
         // Use symlink_metadata to get info about the symlink itself, not its target
         let metadata = std::fs::symlink_metadata(path)?;
@@ -49,8 +66,17 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
             None
         };
 
+        // Ensure we don't store paths with doubled prefixes
+        let clean_path = if path.starts_with(root) {
+            path.to_path_buf()
+        } else {
+            // This shouldn't happen, but if it does, try to clean it up
+            eprintln!("WARNING: Path {} is not under root {}", path.display(), root.display());
+            path.to_path_buf()
+        };
+        
         let file_info = FileInfo {
-            path: path.to_path_buf(),
+            path: clean_path,
             size: metadata.len(),
             modified: metadata.modified()?,
             is_directory: metadata.is_dir(),
@@ -91,9 +117,50 @@ where
     let mut files_needing_checksums = Vec::new();
     let mut count = 0;
 
-    for entry in WalkDir::new(root) {
-        let entry = entry?;
+    // Clone exclude_dirs for the filter closure
+    let exclude_dirs = options.exclude_dirs.clone();
+    
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |e| {
+            // Always allow the root directory
+            if e.path() == root {
+                return true;
+            }
+            
+            // Check if this is a directory that should be excluded
+            if e.file_type().is_dir() {
+                if let Some(name) = e.file_name().to_str() {
+                    for pattern in &exclude_dirs {
+                        if name == pattern || name.contains(pattern) {
+                            return false; // Skip this directory and all its contents
+                        }
+                    }
+                }
+            }
+            true
+        })
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                // Skip permission errors
+                if let Some(io_err) = e.io_error() {
+                    if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                        eprintln!("Warning: Skipping inaccessible path: {}", e.path().unwrap_or(Path::new("<unknown>")).display());
+                        continue;
+                    }
+                }
+                return Err(e.into());
+            }
+        };
         let path = entry.path();
+        
+        // Skip the root directory itself if it's the same as the root we're walking
+        if path == root {
+            continue;
+        }
 
         // Use symlink_metadata to get info about the symlink itself, not its target
         let metadata = std::fs::symlink_metadata(path)?;
@@ -116,23 +183,90 @@ where
             None
         };
 
-        let file_info = FileInfo {
-            path: path.to_path_buf(),
-            size: metadata.len(),
-            modified: metadata.modified()?,
-            is_directory: metadata.is_dir(),
-            is_symlink,
-            symlink_target,
-            checksum: None, // Will be computed later if needed
+        // Handle symlink behavior first
+        let mut skip_file = false;
+        let actual_file_info = if is_symlink {
+            // Found symlink
+            // Symlink behavior
+            match options.symlink_behavior {
+                SymlinkBehavior::Skip => {
+                    // Skip symlinks entirely
+                    skip_file = true;
+                    FileInfo {
+                        path: path.to_path_buf(),
+                        size: metadata.len(),
+                        modified: metadata.modified()?,
+                        is_directory: metadata.is_dir(),
+                        is_symlink,
+                        symlink_target,
+                        checksum: None,
+                    }
+                }
+                SymlinkBehavior::Preserve => {
+                    // Keep as symlink (default behavior)
+                    FileInfo {
+                        path: path.to_path_buf(),
+                        size: metadata.len(),
+                        modified: metadata.modified()?,
+                        is_directory: metadata.is_dir(),
+                        is_symlink,
+                        symlink_target,
+                        checksum: None,
+                    }
+                }
+                SymlinkBehavior::Dereference => {
+                    // Dereference the symlink - get target file info
+                    if let Some(ref target) = symlink_target {
+                        match dereference_symlink(path, target) {
+                            Ok(dereferenced_info) => dereferenced_info,
+                            Err(_e) => {
+                                // Warning: Failed to dereference symlink
+                                skip_file = true;
+                                FileInfo {
+                                    path: path.to_path_buf(),
+                                    size: metadata.len(),
+                                    modified: metadata.modified()?,
+                                    is_directory: metadata.is_dir(),
+                                    is_symlink,
+                                    symlink_target,
+                                    checksum: None,
+                                }
+                            }
+                        }
+                    } else {
+                        // No target found, skip
+                        skip_file = true;
+                        FileInfo {
+                            path: path.to_path_buf(),
+                            size: metadata.len(),
+                            modified: metadata.modified()?,
+                            is_directory: metadata.is_dir(),
+                            is_symlink,
+                            symlink_target,
+                            checksum: None,
+                        }
+                    }
+                }
+            }
+        } else {
+            FileInfo {
+                path: path.to_path_buf(),
+                size: metadata.len(),
+                modified: metadata.modified()?,
+                is_directory: metadata.is_dir(),
+                is_symlink,
+                symlink_target,
+                checksum: None,
+            }
         };
-
-        // Apply filters
-        if should_include_file(&file_info, root, options) {
+        
+        // Apply filters if not skipping  
+        if !skip_file && should_include_file(&actual_file_info, root, options) {
             // Check if we need to compute checksum for this file
-            if options.checksum && !is_symlink && !metadata.is_dir() {
+            if options.checksum && !actual_file_info.is_symlink && !actual_file_info.is_directory {
                 files_needing_checksums.push(file_infos.len());
             }
-            file_infos.push(file_info);
+            file_infos.push(actual_file_info);
         }
 
         // Update progress
@@ -179,6 +313,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
     use jwalk::WalkDir as JWalkDir;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use rayon::prelude::*;
+    use crate::options::SymlinkBehavior;
     
     let file_count = AtomicUsize::new(0);
     
@@ -186,12 +321,18 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
     let entries: Vec<FileInfo> = JWalkDir::new(root)
         .parallelism(jwalk::Parallelism::RayonNewPool(num_cpus::get()))
         .skip_hidden(false)
+        .follow_links(false)
         .into_iter()
         .par_bridge()  // Convert to parallel iterator
         .filter_map(|entry| {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
+                    
+                    // Skip the root directory itself
+                    if path == root {
+                        return None;
+                    }
                     
                     // Get metadata
                     let metadata = match entry.metadata() {
@@ -206,20 +347,85 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                         None
                     };
                     
-                    let file_info = FileInfo {
-                        path: path,
-                        size: metadata.len(),
-                        modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                        is_directory: metadata.is_dir(),
-                        is_symlink,
-                        symlink_target,
-                        checksum: None,
+                    // Handle symlink behavior first
+                    let mut skip_file = false;
+                    let actual_file_info = if is_symlink {
+                        match options.symlink_behavior {
+                            SymlinkBehavior::Skip => {
+                                // Skip symlinks entirely
+                                skip_file = true;
+                                FileInfo {
+                                    path: path,
+                                    size: metadata.len(),
+                                    modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                    is_directory: metadata.is_dir(),
+                                    is_symlink,
+                                    symlink_target,
+                                    checksum: None,
+                                }
+                            }
+                            SymlinkBehavior::Preserve => {
+                                // Keep as symlink (default behavior)
+                                FileInfo {
+                                    path: path,
+                                    size: metadata.len(),
+                                    modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                    is_directory: metadata.is_dir(),
+                                    is_symlink,
+                                    symlink_target,
+                                    checksum: None,
+                                }
+                            }
+                            SymlinkBehavior::Dereference => {
+                                // Dereference the symlink - get target file info
+                                if let Some(ref target) = symlink_target {
+                                    match dereference_symlink(&path, target) {
+                                        Ok(dereferenced_info) => dereferenced_info,
+                                        Err(_) => {
+                                            // Failed to dereference, skip
+                                            skip_file = true;
+                                            FileInfo {
+                                                path: path,
+                                                size: metadata.len(),
+                                                modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                                is_directory: metadata.is_dir(),
+                                                is_symlink,
+                                                symlink_target,
+                                                checksum: None,
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // No target found, skip
+                                    skip_file = true;
+                                    FileInfo {
+                                        path: path,
+                                        size: metadata.len(),
+                                        modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                        is_directory: metadata.is_dir(),
+                                        is_symlink,
+                                        symlink_target,
+                                        checksum: None,
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        FileInfo {
+                            path: path,
+                            size: metadata.len(),
+                            modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            is_directory: metadata.is_dir(),
+                            is_symlink,
+                            symlink_target,
+                            checksum: None,
+                        }
                     };
                     
-                    // Apply filters
-                    if should_include_file(&file_info, root, options) {
+                    // Apply filters if not skipping
+                    if !skip_file && should_include_file(&actual_file_info, root, options) {
                         file_count.fetch_add(1, Ordering::Relaxed);
-                        Some(file_info)
+                        Some(actual_file_info)
                     } else {
                         None
                     }
@@ -898,6 +1104,7 @@ mod tests {
             retry_wait: 30,
             checksum: false,
             forced_strategy: None,
+            symlink_behavior: crate::options::SymlinkBehavior::Preserve,
             #[cfg(target_os = "linux")]
             linux_optimized: false,
         };
@@ -1072,4 +1279,35 @@ mod tests {
 
         assert!(!needs_update(&file1, &file3, &checksum_options));
     }
+}
+
+/// Dereference a symlink and create FileInfo for the target
+fn dereference_symlink(symlink_path: &Path, target_path: &Path) -> Result<FileInfo> {
+    // Resolve the target path (could be relative to the symlink)
+    let resolved_target = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        // Relative path - resolve relative to the symlink's parent directory
+        if let Some(parent) = symlink_path.parent() {
+            parent.join(target_path)
+        } else {
+            target_path.to_path_buf()
+        }
+    };
+    
+    // Get metadata of the target (following the symlink)
+    let metadata = std::fs::metadata(&resolved_target)
+        .with_context(|| format!("Failed to get metadata for symlink target: {}", resolved_target.display()))?;
+    
+    // Create FileInfo for the target, but keep the original symlink path
+    // This way the file will be copied to the symlink's location but with the target's content
+    Ok(FileInfo {
+        path: symlink_path.to_path_buf(), // Keep original symlink path as destination
+        size: metadata.len(),
+        modified: metadata.modified()?,
+        is_directory: metadata.is_dir(),
+        is_symlink: false, // This is now treated as a regular file/directory
+        symlink_target: None, // No longer a symlink
+        checksum: None, // Will be computed later if needed
+    })
 }

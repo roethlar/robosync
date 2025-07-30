@@ -9,6 +9,7 @@ use std::time::Duration;
 pub struct SyncStats {
     files_processed: AtomicU64,
     files_copied: AtomicU64,
+    files_deleted: AtomicU64,
     bytes_transferred: AtomicU64,
     blocks_matched: AtomicU64,
     errors: AtomicU64,
@@ -47,6 +48,11 @@ impl SyncStats {
         self.files_copied.fetch_add(1, Ordering::Relaxed);
     }
     
+    /// Increment files deleted
+    pub fn increment_files_deleted(&self) {
+        self.files_deleted.fetch_add(1, Ordering::Relaxed);
+    }
+    
     /// Increment errors
     pub fn increment_errors(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
@@ -79,6 +85,11 @@ impl SyncStats {
         self.files_copied.load(Ordering::Relaxed)
     }
     
+    /// Get files deleted count
+    pub fn files_deleted(&self) -> u64 {
+        self.files_deleted.load(Ordering::Relaxed)
+    }
+    
     /// Get error count
     pub fn errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
@@ -95,6 +106,7 @@ impl Clone for SyncStats {
         Self {
             files_processed: AtomicU64::new(self.files_processed()),
             files_copied: AtomicU64::new(self.files_copied()),
+            files_deleted: AtomicU64::new(self.files_deleted()),
             bytes_transferred: AtomicU64::new(self.bytes_transferred()),
             blocks_matched: AtomicU64::new(self.blocks_matched()),
             errors: AtomicU64::new(self.errors()),

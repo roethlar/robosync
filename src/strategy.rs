@@ -194,24 +194,9 @@ impl StrategySelector {
                 CopyStrategy::MixedMode
             }
             
-            // Thousands of small files locally - use native tools
+            // Thousands of small files locally - use mixed mode for best performance
             (1000.., 0..=65536, false) => {
-                #[cfg(unix)]
-                if self.available_tools.has_rsync {
-                    return CopyStrategy::NativeRsync {
-                        extra_args: self.build_rsync_args(options),
-                    };
-                }
-                
-                #[cfg(target_os = "windows")]
-                if self.available_tools.has_robocopy {
-                    return CopyStrategy::NativeRobocopy {
-                        extra_args: self.build_robocopy_args(options),
-                    };
-                }
-                
-                // Fallback to platform APIs
-                self.platform_api_strategy()
+                CopyStrategy::MixedMode
             }
             
             // Large files with updates - use delta transfer
@@ -221,23 +206,19 @@ impl StrategySelector {
                 }
             }
             
-            // Network operations with large files - use parallel
+            // Network operations with large files - use mixed mode
             (_, 1048576.., true) => {
-                CopyStrategy::ParallelCustom {
-                    threads: self.optimal_thread_count(is_network),
-                }
+                CopyStrategy::MixedMode
             }
             
-            // Linux with many medium files - consider io_uring
+            // Linux with many medium files - use mixed mode
             #[cfg(target_os = "linux")]
             (100.., 65537..=10485760, false) if options.linux_optimized => {
-                CopyStrategy::IoUringBatch {
-                    batch_size: 256,
-                }
+                CopyStrategy::MixedMode
             }
             
-            // Default to platform APIs for everything else
-            _ => self.platform_api_strategy(),
+            // Default to mixed mode for everything else
+            _ => CopyStrategy::MixedMode,
         }
     }
     
@@ -370,8 +351,8 @@ impl StrategySelector {
     /// Get a description of the chosen strategy
     pub fn describe_strategy(&self, strategy: &CopyStrategy) -> String {
         match strategy {
-            CopyStrategy::NativeRsync { .. } => "Native rsync (optimal for small files)".to_string(),
-            CopyStrategy::NativeRobocopy { .. } => "Native robocopy (optimal for Windows)".to_string(),
+            CopyStrategy::NativeRsync { .. } => "Mixed mode".to_string(), // Shouldn't happen anymore
+            CopyStrategy::NativeRobocopy { .. } => "Mixed mode".to_string(), // Shouldn't happen anymore
             CopyStrategy::PlatformApi { method } => match method {
                 #[cfg(target_os = "windows")]
                 PlatformMethod::WindowsCopyFileEx => "Windows CopyFileEx API".to_string(),
@@ -384,16 +365,10 @@ impl StrategySelector {
             CopyStrategy::DeltaTransfer { block_size } => {
                 format!("Delta transfer ({}KB blocks)", block_size / 1024)
             }
-            CopyStrategy::ParallelCustom { threads } => {
-                format!("Parallel transfer ({} threads)", threads)
-            }
+            CopyStrategy::ParallelCustom { .. } => "Mixed mode".to_string(),
             #[cfg(target_os = "linux")]
-            CopyStrategy::IoUringBatch { batch_size } => {
-                format!("io_uring batch copy ({} files/batch)", batch_size)
-            }
-            CopyStrategy::MixedMode => {
-                "Mixed mode (parallel for small, platform API for medium, delta for large)".to_string()
-            }
+            CopyStrategy::IoUringBatch { .. } => "Mixed mode".to_string(),
+            CopyStrategy::MixedMode => "Mixed mode".to_string(),
         }
     }
 }

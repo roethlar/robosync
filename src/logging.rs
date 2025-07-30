@@ -159,9 +159,15 @@ impl SyncLogger {
             "N/A".to_string()
         };
 
+        let operation_summary = if stats.files_deleted() > 0 {
+            format!("{} files copied, {} files deleted", stats.files_copied(), stats.files_deleted())
+        } else {
+            format!("{} files", stats.files_copied())
+        };
+        
         let summary = format!(
-            "Parallel synchronization completed successfully! {} files, {} bytes transferred in {:.2}s ({})",
-            self.completed_files,
+            "Parallel synchronization completed successfully! {}, {} bytes transferred in {:.2}s ({})",
+            operation_summary,
             stats.bytes_transferred(),
             elapsed_secs,
             rate_str

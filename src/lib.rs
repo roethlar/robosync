@@ -27,6 +27,9 @@ pub mod sync;
 pub mod sync_stats;
 pub mod mixed_strategy;
 pub mod fast_file_list;
+pub mod multi_progress;
+pub mod scrolling_progress;
+pub mod formatted_display;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]

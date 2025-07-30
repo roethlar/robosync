@@ -3,6 +3,17 @@
 use crate::compression::CompressionConfig;
 use std::path::PathBuf;
 
+/// Symlink handling behavior
+#[derive(Debug, Clone, PartialEq)]
+pub enum SymlinkBehavior {
+    /// Preserve symlinks as symlinks (default, equivalent to --links)
+    Preserve,
+    /// Dereference symlinks - copy the target content (equivalent to --deref)
+    Dereference,
+    /// Skip symlinks entirely (equivalent to --no-links)
+    Skip,
+}
+
 /// Synchronization options parsed from command line
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
@@ -30,6 +41,7 @@ pub struct SyncOptions {
     #[cfg(target_os = "linux")]
     pub linux_optimized: bool,
     pub forced_strategy: Option<String>,
+    pub symlink_behavior: SymlinkBehavior,
     // shimmer_model_path removed - AI features moved to separate project
 }
 
@@ -59,6 +71,7 @@ impl Default for SyncOptions {
             #[cfg(target_os = "linux")]
             linux_optimized: false,
             forced_strategy: None,
+            symlink_behavior: SymlinkBehavior::Preserve,
         }
     }
 }

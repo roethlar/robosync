@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Arg, Command};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use robosync::compression::CompressionConfig;
-use robosync::options::SyncOptions;
+use robosync::options::{SyncOptions, SymlinkBehavior};
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 use robosync::sync;
 
@@ -266,12 +266,6 @@ fn main() -> Result<()> {
                 .help("Block size for delta algorithm in bytes (default: 1024). Smaller blocks find more matches but use more CPU/memory. Larger blocks are faster but may transfer more data.")
                 .value_parser(clap::value_parser!(usize))
         )
-        .arg(
-            Arg::new("sequential")
-                .long("sequential")
-                .help("Force sequential processing (disables parallelism)")
-                .action(clap::ArgAction::SetTrue)
-        )
 
         // Legacy rsync options
         .arg(
@@ -295,6 +289,26 @@ fn main() -> Result<()> {
                 .long("compress")
                 .help("Compress file data during transfer")
                 .action(clap::ArgAction::SetTrue)
+        )
+
+        // Symlink handling options
+        .arg(
+            Arg::new("links")
+                .long("links")
+                .help("Copy symlinks as symlinks (default behavior)")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("deref")
+                .long("deref")
+                .help("Dereference symlinks - copy the target file/directory instead of the symlink")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("no-links")
+                .long("no-links")
+                .help("Skip symlinks entirely - do not copy symlinks or their targets")
+                .action(clap::ArgAction::SetTrue)
         );
         
         #[cfg(target_os = "linux")]
@@ -309,9 +323,9 @@ fn main() -> Result<()> {
         let matches = matches;
         
         let matches = matches.arg(
-            Arg::new("smart")
-                .long("smart")
-                .help("Use intelligent strategy selection to choose the optimal copy method")
+            Arg::new("no-smart")
+                .long("no-smart")
+                .help("Disable intelligent strategy selection (use basic parallel mode)")
                 .action(clap::ArgAction::SetTrue)
         );
         
@@ -319,8 +333,8 @@ fn main() -> Result<()> {
             Arg::new("strategy")
                 .long("strategy")
                 .value_name("METHOD")
-                .help("Force a specific copy strategy: rsync, robocopy, platform, delta, parallel, io_uring, mixed")
-                .value_parser(["rsync", "robocopy", "platform", "delta", "parallel", "io_uring", "mixed"])
+                .help("Force a specific copy strategy: delta, mixed")
+                .value_parser(["delta", "mixed"])
         );
         
         let matches = matches.arg(
@@ -344,26 +358,56 @@ fn main() -> Result<()> {
         .get_matches();
 
     // For regular sync operations, source and destination are required
-    let source: PathBuf = matches.get_one::<PathBuf>("source")
+    let source_arg: PathBuf = matches.get_one::<PathBuf>("source")
         .ok_or_else(|| anyhow::anyhow!("Source path required"))?
         .clone();
     let destination: PathBuf = matches.get_one::<PathBuf>("destination")
         .ok_or_else(|| anyhow::anyhow!("Destination path required"))?
         .clone();
+    
+    // Use the source path as-is to maintain correct path structure
+    // Don't canonicalize as it breaks path stripping when source is a symlink
+    let source = source_arg.clone();
+    
+    // Check if the source exists
+    if !source.exists() {
+        eprintln!("\n  ❌ Error: Source path does not exist: {}\n", source.display());
+        std::process::exit(1);
+    }
 
     // Parse options
     let compress = matches.get_flag("compress");
-    let sequential = matches.get_flag("sequential");
-    let parallel = !sequential;
     let verbose = matches.get_count("verbose");
     let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
     let no_progress = matches.get_flag("no-progress");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
-    let smart_mode = matches.get_flag("smart");
+    let no_smart = matches.get_flag("no-smart");
+    let smart_mode = !no_smart;  // Smart mode is now default
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
     let has_forced_strategy = forced_strategy.is_some();
+
+    // Parse symlink handling options
+    let links = matches.get_flag("links");
+    let deref = matches.get_flag("deref");
+    let no_links = matches.get_flag("no-links");
+    
+    // Validate symlink options - only one can be specified
+    let symlink_count = [links, deref, no_links].iter().filter(|&&x| x).count();
+    if symlink_count > 1 {
+        eprintln!("\n  ❌ Error: Only one symlink option can be specified: --links, --deref, or --no-links\n");
+        std::process::exit(1);
+    }
+    
+    // Determine symlink behavior (default is links)
+    let symlink_behavior = if deref {
+        SymlinkBehavior::Dereference
+    } else if no_links {
+        SymlinkBehavior::Skip
+    } else {
+        SymlinkBehavior::Preserve // Default behavior
+    };
     #[cfg(target_os = "linux")]
     let linux_optimized = matches.get_flag("linux-optimized");
     #[cfg(not(target_os = "linux"))]
@@ -416,10 +460,8 @@ fn main() -> Result<()> {
     // Validate thread count based on OS limits
     let max_threads = get_max_thread_count();
     if threads > max_threads {
-        eprintln!(
-            "Error: Maximum thread count is {max_threads} to avoid system file handle limits."
-        );
-        eprintln!("Requested: {threads}, Maximum allowed: {max_threads}");
+        eprintln!("\n  ❌ Error: Maximum thread count is {} to avoid system file handle limits.", max_threads);
+        eprintln!("     Requested: {}, Maximum allowed: {}\n", threads, max_threads);
         std::process::exit(1);
     }
 
@@ -431,25 +473,15 @@ fn main() -> Result<()> {
     let retry_count = matches.get_one::<u32>("retry-count").copied().unwrap_or(0);
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
-    println!(
-        "RoboSync v{}: Fast parallel file synchronization",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("Source: {}", source.display());
-    println!("Destination: {}", destination.display());
-
-    if dry_run {
-        println!("Mode: DRY RUN (list only)");
-    } else if smart_mode {
-        println!("Mode: SMART (intelligent strategy selection)");
-    } else {
-        println!("Mode: {}", if parallel { "parallel" } else { "sequential" });
-    }
-
-    if parallel && !dry_run {
-        println!("Threads: {threads} (max allowed: {max_threads})");
-        println!("Block size: {block_size} bytes");
-    }
+    // Print header with formatted output
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    println!("     RoboSync v{}: Fast parallel file synchronization", env!("CARGO_PKG_VERSION"));
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    println!("    ╭────────┬──────────────────────────────────────────────╮");
+    println!("    │ Source │ {:<44} │", source.display());
+    println!("    ├────────┼──────────────────────────────────────────────┤");
+    println!("    │ Dest   │ {:<44} │", destination.display());
+    println!("    ╰────────┴──────────────────────────────────────────────╯");
 
     // Show active options
     let mut options = Vec::new();
@@ -488,25 +520,58 @@ fn main() -> Result<()> {
         options.push("max-size");
     }
 
-    if !options.is_empty() {
-        println!("Options: {}", options.join(", "));
+    // Show exclude/include patterns if any
+    if !exclude_files.is_empty() {
+        println!("      Excl. : {}", exclude_files.join(" "));
     }
-
-    if copy_all || archive {
-        println!("Copy flags: DATSOU (all)");
-    } else {
-        println!("Copy flags: {copy_flags}");
+    if !exclude_dirs.is_empty() {
+        println!("      Excl. : {} (dirs)", exclude_dirs.join(" "));
     }
-
-    if retry_count > 0 {
-        println!("Retry: {retry_count} retries, {retry_wait} seconds wait");
+    
+    // Show options
+    if !options.is_empty() || !dry_run {
+        let mut all_options = Vec::new();
+        
+        // Add mode options
+        if mirror {
+            all_options.push("--mir");
+        } else if recursive {
+            all_options.push("-r");
+        }
+        if archive {
+            all_options.push("-a");
+        }
+        if compress {
+            all_options.push("-z");
+        }
+        if checksum {
+            all_options.push("-c");
+        }
+        if move_files {
+            all_options.push("--mov");
+        }
+        let verbose_str = format!("-{}", "v".repeat(verbose as usize));
+        if verbose > 0 {
+            all_options.push(&verbose_str);
+        }
+        let thread_str = format!("--mt {}", threads);
+        if !dry_run && threads != num_cpus {
+            all_options.push(&thread_str);
+        }
+        
+        if !all_options.is_empty() {
+            println!("    Options : {}", all_options.join(" "));
+        }
     }
+    
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
 
     // Warn about dangerous combinations
     if move_files && mirror {
-        eprintln!("\nWARNING: Using --mov with --mir is dangerous!");
-        eprintln!("If the sync is interrupted, source files already moved will be lost.");
-        eprintln!("Consider using --mir without --mov for safety.\n");
+        eprintln!("  ⚠️  WARNING: Using --mov with --mir is dangerous!");
+        eprintln!("     If the sync is interrupted, source files already moved will be lost.");
+        eprintln!("     Consider using --mir without --mov for safety.");
+        eprintln!();
     }
 
     // Create sync options struct
@@ -542,10 +607,11 @@ fn main() -> Result<()> {
         #[cfg(target_os = "linux")]
         linux_optimized,
         forced_strategy,
+        symlink_behavior,
     };
 
     if smart_mode || has_forced_strategy {
-        // Use intelligent strategy selection or forced strategy
+        // Use intelligent strategy selection or forced strategy (default path)
         let config = ParallelSyncConfig {
             worker_threads: threads,
             io_threads: threads,
@@ -555,11 +621,11 @@ fn main() -> Result<()> {
 
         let syncer = ParallelSyncer::new(config);
         let _stats = syncer.synchronize_smart(source, destination, sync_options)?;
-    } else if parallel && !dry_run {
-        // Use new parallel synchronization engine
+    } else if !dry_run {
+        // Basic parallel mode (when --no-smart is used)
         let config = ParallelSyncConfig {
             worker_threads: threads,
-            io_threads: threads, // Same as worker threads, like RoboCopy
+            io_threads: threads,
             block_size,
             max_parallel_files: threads * 2,
         };
@@ -567,7 +633,7 @@ fn main() -> Result<()> {
         let syncer = ParallelSyncer::new(config);
         let _stats = syncer.synchronize_with_options(source, destination, sync_options)?;
     } else {
-        // Fall back to sequential synchronization or dry run
+        // Dry run mode
         sync::synchronize_with_options(source, destination, threads, sync_options)?;
     }
 

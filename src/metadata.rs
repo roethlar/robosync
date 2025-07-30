@@ -27,6 +27,7 @@ impl Default for CopyFlags {
 
 impl CopyFlags {
     /// Parse copy flags from string (e.g., "DAT", "DATSOU")
+    /// Automatically filters out unsupported flags based on the current platform
     pub fn from_string(flags: &str) -> Self {
         let flags_upper = flags.to_uppercase();
         Self {
@@ -35,7 +36,8 @@ impl CopyFlags {
             timestamps: flags_upper.contains('T'),
             security: flags_upper.contains('S'),
             owner: flags_upper.contains('O'),
-            auditing: flags_upper.contains('U'),
+            // Auditing (U flag) is not supported on any current platform, so always false
+            auditing: false,
         }
     }
 
@@ -117,18 +119,7 @@ fn copy_file_with_metadata_internal(
         copy_ownership(source, destination, &source_metadata)?;
     }
 
-    // Auditing info (U flag) is typically not supported on most filesystems
-    // We'll just log that it was requested but not implemented
-    if flags.auditing {
-        let warning = "Warning: Auditing info copying (U flag) not supported on this platform";
-        if let Some(warnings) = warnings {
-            if let Ok(mut w) = warnings.lock() {
-                w.push(warning.to_string());
-            }
-        } else {
-            eprintln!("{warning}");
-        }
-    }
+    // Auditing info (U flag) is filtered out during flag parsing, so no warning needed
 
     Ok(bytes_copied)
 }
@@ -379,31 +370,258 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> Result<()> {
     Ok(())
 }
 
-/// Check if a path is a network path (UNC path on Windows or mounted network drive)
-fn is_network_path(path: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        // Check for UNC paths (\\server\share) or network drive letters
-        if let Some(path_str) = path.to_str() {
-            if path_str.starts_with("\\\\") {
-                return true;
-            }
-            // Could also check if drive letter is a network drive using WinAPI
+/// Filesystem type information
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilesystemType {
+    Local,
+    Network,
+    Tmpfs,
+    Unknown,
+}
+
+/// Filesystem capability information
+#[derive(Debug, Clone)]
+pub struct FilesystemCapabilities {
+    pub supports_ownership: bool,
+    pub supports_permissions: bool,
+    pub supports_timestamps: bool,
+    pub supports_extended_attributes: bool,
+    pub filesystem_type: FilesystemType,
+}
+
+impl Default for FilesystemCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_ownership: true,
+            supports_permissions: true,
+            supports_timestamps: true,
+            supports_extended_attributes: true,
+            filesystem_type: FilesystemType::Local,
         }
     }
-    
+}
+
+/// Detect filesystem type and capabilities for a given path
+pub fn detect_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilities> {
+    // First try to get filesystem information using statfs (Unix) or GetVolumeInformation (Windows)
     #[cfg(unix)]
     {
-        // On Unix, check for common network mount points
-        if let Some(path_str) = path.to_str() {
-            if path_str.starts_with("/mnt/") || path_str.starts_with("/media/") 
-                || path_str.starts_with("/net/") || path_str.starts_with("/smb/") {
-                return true;
+        detect_unix_filesystem_capabilities(path)
+    }
+    
+    #[cfg(windows)]
+    {
+        detect_windows_filesystem_capabilities(path)
+    }
+}
+
+/// Detect filesystem capabilities on Unix systems
+#[cfg(unix)]
+fn detect_unix_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilities> {
+    // Try to get the mount point for this path
+    let mount_info = get_mount_info(path)?;
+    
+    let mut caps = FilesystemCapabilities::default();
+    caps.filesystem_type = classify_unix_filesystem(&mount_info.fstype, &mount_info.mount_point);
+    
+    // Set capabilities based on filesystem type
+    match mount_info.fstype.as_str() {
+        // Network filesystems - limited capabilities
+        "nfs" | "nfs4" | "cifs" | "smb" | "smbfs" | "fuse.sshfs" => {
+            caps.supports_ownership = false; // Usually fails due to uid mapping
+            caps.supports_extended_attributes = false;
+            caps.filesystem_type = FilesystemType::Network;
+        },
+        // Temporary filesystems
+        "tmpfs" | "ramfs" => {
+            caps.filesystem_type = FilesystemType::Tmpfs;
+        },
+        // FAT filesystems - very limited
+        "vfat" | "fat32" | "msdos" => {
+            caps.supports_ownership = false;
+            caps.supports_permissions = false; // Only basic read-only attribute
+            caps.supports_extended_attributes = false;
+        },
+        // NTFS via ntfs-3g - mixed capabilities
+        "ntfs" | "fuseblk" => {
+            caps.supports_ownership = false; // Usually mapped to mount user
+            caps.supports_extended_attributes = false;
+        },
+        // Full-featured filesystems (ext4, xfs, btrfs, zfs)
+        _ => {
+            // Keep default full capabilities
+        }
+    }
+    
+    Ok(caps)
+}
+
+/// Get mount information for a path on Unix
+#[cfg(unix)]
+fn get_mount_info(path: &Path) -> Result<MountInfo> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    
+    let canonical_path = std::fs::canonicalize(path)
+        .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
+    
+    let file = File::open("/proc/mounts")
+        .context("Failed to open /proc/mounts")?;
+    let reader = BufReader::new(file);
+    
+    let mut best_match = MountInfo {
+        mount_point: "/".to_string(),
+        fstype: "unknown".to_string(),
+    };
+    let mut best_match_len = 0;
+    
+    for line in reader.lines() {
+        let line = line.context("Failed to read line from /proc/mounts")?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let mount_point = parts[1];
+            let fstype = parts[2];
+            
+            // Find the longest matching mount point
+            if canonical_path.starts_with(mount_point) && mount_point.len() > best_match_len {
+                best_match = MountInfo {
+                    mount_point: mount_point.to_string(),
+                    fstype: fstype.to_string(),
+                };
+                best_match_len = mount_point.len();
             }
         }
     }
     
-    false
+    Ok(best_match)
+}
+
+#[cfg(unix)]
+struct MountInfo {
+    mount_point: String,
+    fstype: String,
+}
+
+/// Classify Unix filesystem type
+#[cfg(unix)]
+fn classify_unix_filesystem(fstype: &str, mount_point: &str) -> FilesystemType {
+    match fstype {
+        "nfs" | "nfs4" | "cifs" | "smb" | "smbfs" | "fuse.sshfs" => FilesystemType::Network,
+        "tmpfs" | "ramfs" => FilesystemType::Tmpfs,
+        _ => {
+            // Also check mount point patterns for network mounts
+            if mount_point.starts_with("/mnt/") || mount_point.starts_with("/media/") 
+                || mount_point.starts_with("/net/") || mount_point.starts_with("/smb/") {
+                FilesystemType::Network
+            } else {
+                FilesystemType::Local
+            }
+        }
+    }
+}
+
+/// Detect filesystem capabilities on Windows
+#[cfg(windows)]
+fn detect_windows_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilities> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    
+    let mut caps = FilesystemCapabilities::default();
+    
+    // Check if it's a UNC path (network)
+    if let Some(path_str) = path.to_str() {
+        if path_str.starts_with("\\\\") {
+            caps.filesystem_type = FilesystemType::Network;
+            caps.supports_ownership = false; // Usually fails on network shares
+            caps.supports_extended_attributes = false;
+            return Ok(caps);
+        }
+    }
+    
+    // For local paths, try to get volume information
+    let root_path = get_volume_root(path)?;
+    let root_wide: Vec<u16> = OsStr::new(&root_path).encode_wide().chain(std::iter::once(0)).collect();
+    
+    let mut fs_name = [0u16; 256];
+    let mut volume_flags = 0u32;
+    
+    unsafe {
+        let success = winapi::um::fileapi::GetVolumeInformationW(
+            root_wide.as_ptr(),
+            std::ptr::null_mut(), 0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut volume_flags,
+            fs_name.as_mut_ptr(), fs_name.len() as u32,
+        );
+        
+        if success != 0 {
+            let fs_name_str = String::from_utf16_lossy(&fs_name);
+            let fs_name_clean = fs_name_str.trim_end_matches('\0').to_lowercase();
+            
+            match fs_name_clean.as_str() {
+                "fat" | "fat32" | "exfat" => {
+                    caps.supports_ownership = false;
+                    caps.supports_permissions = false;
+                    caps.supports_extended_attributes = false;
+                },
+                _ => {
+                    // NTFS and other filesystems usually support most features
+                }
+            }
+        }
+    }
+    
+    Ok(caps)
+}
+
+#[cfg(windows)]
+fn get_volume_root(path: &Path) -> Result<String> {
+    let path_str = path.to_str().context("Invalid path encoding")?;
+    
+    if path_str.len() >= 2 && path_str.chars().nth(1) == Some(':') {
+        Ok(format!("{}:\\", path_str.chars().nth(0).unwrap().to_uppercase()))
+    } else {
+        Ok("\\".to_string())
+    }
+}
+
+/// Filter copy flags based on filesystem capabilities
+pub fn filter_copy_flags_for_filesystem(flags: &CopyFlags, caps: &FilesystemCapabilities) -> CopyFlags {
+    CopyFlags {
+        data: flags.data, // Always preserve data
+        attributes: flags.attributes && caps.supports_extended_attributes,
+        timestamps: flags.timestamps && caps.supports_timestamps,
+        security: flags.security && caps.supports_permissions,
+        owner: flags.owner && caps.supports_ownership,
+        auditing: false, // Always filtered out
+    }
+}
+
+/// Check if a path is a network path (UNC path on Windows or mounted network drive)
+pub fn is_network_path(path: &Path) -> bool {
+    match detect_filesystem_capabilities(path) {
+        Ok(caps) => caps.filesystem_type == FilesystemType::Network,
+        Err(_) => {
+            // Fallback to simple heuristics
+            #[cfg(windows)]
+            {
+                if let Some(path_str) = path.to_str() {
+                    return path_str.starts_with("\\\\");
+                }
+            }
+            
+            #[cfg(unix)]
+            {
+                if let Some(path_str) = path.to_str() {
+                    return path_str.starts_with("/mnt/") || path_str.starts_with("/media/") 
+                        || path_str.starts_with("/net/") || path_str.starts_with("/smb/");
+                }
+            }
+            
+            false
+        }
+    }
 }
 
 /// Optimized streaming copy for network transfers
@@ -488,7 +706,7 @@ mod tests {
         assert!(all_flags.timestamps);
         assert!(all_flags.security);
         assert!(all_flags.owner);
-        assert!(all_flags.auditing);
+        assert!(!all_flags.auditing); // Auditing is always false (unsupported)
     }
 
     #[test]
@@ -510,6 +728,6 @@ mod tests {
         assert!(flags.timestamps);
         assert!(flags.security);
         assert!(flags.owner);
-        assert!(flags.auditing);
+        assert!(!flags.auditing); // Auditing is always false (unsupported)
     }
 }

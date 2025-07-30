@@ -30,7 +30,40 @@ use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
 use crate::mixed_strategy::MixedStrategyExecutor;
+use crate::formatted_display;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
+/// Format number with thousands separator
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::new();
+    
+    for (i, &ch) in chars.iter().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    
+    result.chars().rev().collect()
+}
+
+/// Format bytes to human readable string
+fn humanize_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let exponent = (bytes as f64).log(1024.0).floor() as usize;
+    let exponent = exponent.min(UNITS.len() - 1);
+    let value = bytes as f64 / 1024_f64.powi(exponent as i32);
+    if exponent == 0 {
+        format!("{} {}", bytes, UNITS[exponent])
+    } else {
+        format!("{:.1} {}", value, UNITS[exponent])
+    }
+}
 
 /// Configuration for multithreaded synchronization
 #[derive(Debug, Clone)]
@@ -76,7 +109,7 @@ impl ParallelSyncer {
         destination: PathBuf,
         options: SyncOptions,
     ) -> Result<SyncStats> {
-        println!("RoboSync Smart Mode: Analyzing files to choose optimal strategy...");
+        println!("  🔍 RoboSync Smart Mode: Analyzing files to choose optimal strategy...");
         
         // First, analyze the files to determine the best strategy
         let source_files = if source.is_dir() {
@@ -105,13 +138,25 @@ impl ParallelSyncer {
         // Calculate statistics
         let file_stats = FileStats::from_operations(&source_files);
         
-        println!("File analysis complete:");
-        println!("  Total files: {}", file_stats.total_files);
-        println!("  Total size: {} MB", file_stats.total_size / 1_048_576);
-        println!("  Average size: {} KB", file_stats.avg_size / 1024);
-        println!("  Small files (<64KB): {}", file_stats.small_files);
-        println!("  Medium files (64KB-10MB): {}", file_stats.medium_files);
-        println!("  Large files (>10MB): {}", file_stats.large_files);
+        println!("\n  File Analysis Complete:");
+        println!("    ╭────────┬────────────┬───────────┬───────────┬─────────╮");
+        println!("    │ Files  │ T: {:>6}  │ S: {:>6} │ M: {:>6} │ L: {:>3} │", 
+            format_number(file_stats.total_files as u64),
+            format_number(file_stats.small_files as u64),
+            format_number(file_stats.medium_files as u64),
+            format_number(file_stats.large_files as u64)
+        );
+        println!("    ├────────┼────────────┴───────────┼───────────┴─────────┤");
+        let avg_size_str = if file_stats.total_files > 0 {
+            humanize_bytes(file_stats.avg_size)
+        } else {
+            "0 B".to_string()
+        };
+        println!("    │ Size   │ T: {:>15}     │ A: {:>15}  │", 
+            humanize_bytes(file_stats.total_size),
+            avg_size_str
+        );
+        println!("    └────────┴────────────────────────┴─────────────────────┘");
         
         // Choose strategy using intelligent heuristics
         let strategy = if let Some(ref forced) = options.forced_strategy {
@@ -119,46 +164,54 @@ impl ParallelSyncer {
             let selector = StrategySelector::new();
             match forced.as_str() {
                 "rsync" => {
-                    println!("Using forced strategy: rsync");
+                    println!("  Using forced strategy: rsync");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::NativeRsync {
                         extra_args: selector.build_rsync_args(&options),
                     }
                 }
                 "robocopy" => {
-                    println!("Using forced strategy: robocopy");
+                    println!("  Using forced strategy: robocopy");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::NativeRobocopy {
                         extra_args: selector.build_robocopy_args(&options),
                     }
                 }
                 "platform" => {
-                    println!("Using forced strategy: platform API");
+                    println!("  Using forced strategy: platform API");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     selector.platform_api_strategy()
                 }
                 "delta" => {
-                    println!("Using forced strategy: delta transfer");
+                    println!("  Using forced strategy: delta transfer");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::DeltaTransfer {
                         block_size: selector.optimal_block_size(file_stats.avg_size),
                     }
                 }
                 "parallel" => {
-                    println!("Using forced strategy: parallel");
+                    println!("  Using forced strategy: parallel");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::ParallelCustom {
                         threads: selector.optimal_thread_count(false),
                     }
                 }
                 #[cfg(target_os = "linux")]
                 "io_uring" => {
-                    println!("Using forced strategy: io_uring");
+                    println!("  Using forced strategy: io_uring");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::IoUringBatch {
                         batch_size: 256,
                     }
                 }
                 "mixed" => {
-                    println!("Using forced strategy: mixed mode");
+                    println!("  Using forced strategy: mixed mode");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::MixedMode
                 }
                 "concurrent" => {
-                    println!("Using forced strategy: mixed mode");
+                    println!("  Using forced strategy: mixed mode");
+                    println!("  ───────────────────────────────────────────────────────────────────────────────");
                     CopyStrategy::MixedMode
                 }
                 _ => {
@@ -169,7 +222,8 @@ impl ParallelSyncer {
         } else {
             let selector = StrategySelector::new();
             let chosen = selector.choose_strategy(&file_stats, &source, &destination, &options);
-            println!("\nAutomatically selected strategy: {}", selector.describe_strategy(&chosen));
+            println!("  Automatically selected strategy: {}", selector.describe_strategy(&chosen));
+            println!("  ───────────────────────────────────────────────────────────────────────────────");
             chosen
         };
         
@@ -314,7 +368,7 @@ impl ParallelSyncer {
         destination: &Path,
         options: &SyncOptions,
     ) -> Result<Vec<FileOperation>> {
-        println!("Starting fast file enumeration...");
+        println!("  🔍 Starting fast file enumeration...");
         
         // Create fast enumeration configuration
         let enum_config = FastEnumConfig {
@@ -440,6 +494,7 @@ impl ParallelSyncer {
         destination: &Path,
         options: &SyncOptions,
     ) -> Result<SyncStats> {
+        let start_time = Instant::now();
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
         logger.initialize_progress(1, std::fs::metadata(source)?.len());
 
@@ -454,7 +509,22 @@ impl ParallelSyncer {
 
         let stats = self.sync_file_pair(source, &dest_path, options)?;
         logger.update_progress(1, stats.bytes_transferred());
-        logger.log_summary(&stats);
+        
+        // Use formatted display for completion
+        let elapsed = start_time.elapsed();
+        let throughput = if elapsed.as_secs() > 0 {
+            stats.bytes_transferred() / elapsed.as_secs()
+        } else {
+            stats.bytes_transferred()
+        };
+        
+        println!("\n  ───────────────────────────────────────────────────────────────────────────────");
+        println!("\n  ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+            elapsed.as_secs_f32(),
+            format_number(stats.files_copied()),
+            humanize_bytes(stats.bytes_transferred()),
+            humanize_bytes(throughput)
+        );
 
         Ok(stats)
     }
@@ -466,6 +536,8 @@ impl ParallelSyncer {
         destination: &Path,
         options: &SyncOptions,
     ) -> Result<SyncStats> {
+        let start_time = Instant::now();
+        
         // Create logger and multi-progress for this sync operation
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
 
@@ -1520,7 +1592,33 @@ impl ParallelSyncer {
         }
 
         let final_stats = Arc::try_unwrap(stats).unwrap();
-        logger.log_summary(&final_stats);
+        
+        // Use formatted display for completion
+        let elapsed = start_time.elapsed();
+        let throughput = if elapsed.as_secs() > 0 {
+            final_stats.bytes_transferred() / elapsed.as_secs()
+        } else {
+            final_stats.bytes_transferred()
+        };
+        
+        println!("\n  ───────────────────────────────────────────────────────────────────────────────");
+        
+        if final_stats.files_deleted() > 0 {
+            println!("\n  ✅ Completed in {:.1}s: {} files copied, {} files deleted, {} transferred ({}/s)",
+                elapsed.as_secs_f32(),
+                format_number(final_stats.files_copied()),
+                format_number(final_stats.files_deleted()),
+                humanize_bytes(final_stats.bytes_transferred()),
+                humanize_bytes(throughput)
+            );
+        } else {
+            println!("\n  ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+                elapsed.as_secs_f32(),
+                format_number(final_stats.files_copied()),
+                humanize_bytes(final_stats.bytes_transferred()),
+                humanize_bytes(throughput)
+            );
+        }
 
         Ok(final_stats)
     }

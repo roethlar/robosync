@@ -1,0 +1,257 @@
+//! Formatted display output for RoboSync
+
+use std::io::{self, Write};
+use std::time::Instant;
+use indicatif::{ProgressBar, ProgressStyle};
+use crate::sync_stats::SyncStats;
+
+/// Display formatted header
+pub fn print_header(version: &str, source: &str, dest: &str, include: &str, exclude: &[String], options: &str) {
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    println!("     RoboSync {}: Fast parallel file synchronization", version);
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    
+    // Calculate max width for proper alignment
+    let max_len = source.len().max(dest.len()).max(50);
+    
+    println!("    ╭────────┬{}╮", "─".repeat(max_len + 2));
+    println!("    │ Source │ {:<width$} │", source, width = max_len);
+    println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
+    println!("    │ Dest   │ {:<width$} │", dest, width = max_len);
+    
+    if !include.is_empty() && include != "*.*" {
+        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("    │ Incl.  │ {:<width$} │", include, width = max_len);
+    }
+    
+    if !exclude.is_empty() {
+        let exclude_str = exclude.join(" ");
+        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("    │ Excl.  │ {:<width$} │", exclude_str, width = max_len);
+    }
+    
+    if !options.is_empty() {
+        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("    │ Options│ {:<width$} │", options, width = max_len);
+    }
+    
+    println!("    └────────┴{}┘", "─".repeat(max_len + 2));
+    println!("  ───────────────────────────────────────────────────────────────────────────────");
+}
+
+/// Display file analysis results
+pub fn print_file_analysis(
+    total_files: u64,
+    small_files: u64,
+    medium_files: u64,
+    large_files: u64,
+    total_size: u64,
+    small_size: u64,
+    medium_size: u64,
+    large_size: u64,
+) {
+    println!("\n  File Analysis Complete:");
+    println!("    ╭────────┬────────────┬───────────┬───────────┬───────────╮");
+    println!("    │        │ Total      │ Small     │ Medium    │ Large     │");
+    println!("    ├────────┼────────────┼───────────┼───────────┼───────────┤");
+    println!("    │ Files  │ {:>10} │ {:>9} │ {:>9} │ {:>9} │",
+        format_number(total_files),
+        format_number(small_files),
+        format_number(medium_files),
+        format_number(large_files)
+    );
+    println!("    ├────────┼────────────┼───────────┼───────────┼───────────┤");
+    println!("    │ Size   │ {:>10} │ {:>9} │ {:>9} │ {:>9} │",
+        format_bytes(total_size),
+        format_bytes(small_size),
+        format_bytes(medium_size),
+        format_bytes(large_size)
+    );
+    println!("    └────────┴────────────┴───────────┴───────────┴───────────┘");
+}
+
+/// Display pending operations
+pub fn print_pending_operations(
+    files_create: u64,
+    files_update: u64,
+    files_delete: u64,
+    files_skip: u64,
+    dirs_create: u64,
+    dirs_update: u64,
+    dirs_delete: u64,
+    dirs_skip: u64,
+    size_create: u64,
+    size_update: u64,
+    size_delete: u64,
+    size_skip: u64,
+) {
+    let files_total = files_create + files_update + files_delete + files_skip;
+    let dirs_total = dirs_create + dirs_update + dirs_delete + dirs_skip;
+    let size_total = size_create + size_update + size_delete + size_skip;
+    
+    println!("\n  Pending Operations:");
+    println!("    ╭──────────┬────────┬────────┬─────────┬────────┬─────────╮");
+    println!("    │ Type     │ Create │ Update │ Delete  │ Skip   │ Total   │");
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Files    │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        format_number(files_create),
+        format_number(files_update),
+        format_number(files_delete),
+        format_number(files_skip),
+        format_number(files_total)
+    );
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Dirs     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        format_number(dirs_create),
+        format_number(dirs_update),
+        format_number(dirs_delete),
+        format_number(dirs_skip),
+        format_number(dirs_total)
+    );
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Size     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        format_bytes_short(size_create),
+        format_bytes_short(size_update),
+        format_bytes_short(size_delete),
+        format_bytes_short(size_skip),
+        format_bytes_short(size_total)
+    );
+    println!("    └──────────┴────────┴────────┴─────────┴────────┴─────────┘");
+}
+
+/// Display sync summary
+pub fn print_sync_summary(stats: &SyncStats, skipped_files: u64, skipped_dirs: u64, skipped_size: u64) {
+    println!("\n  Sync Summary:");
+    println!("    ╭──────────┬────────┬────────┬─────────┬────────┬─────────╮");
+    println!("    │ Type     │ Copied │ Updated│ Deleted │ Failed │ Skipped │");
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Files    │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        format_number(stats.files_copied()),
+        "0",  // Updated tracked separately in our case
+        format_number(stats.files_deleted()),
+        format_number(stats.errors()),
+        format_number(skipped_files)
+    );
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Dirs     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        "0",  // Dir stats not tracked separately
+        "0",
+        "0",
+        "0",
+        format_number(skipped_dirs)
+    );
+    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
+    println!("    │ Size     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+        format_bytes_short(stats.bytes_transferred()),
+        "0 B",
+        "0 B",
+        "0 B",
+        format_bytes_short(skipped_size)
+    );
+    println!("    └──────────┴────────┴────────┴─────────┴────────┴─────────┘");
+}
+
+/// Display worker performance
+pub fn print_worker_performance(workers: Vec<WorkerStats>) {
+    if workers.is_empty() {
+        return;
+    }
+    
+    println!("\n  Worker Performance:");
+    println!("    ╭────────────────────┬─────────┬──────────┬───────────┬────────────╮");
+    println!("    │ Worker             │ Files   │ Size     │ Time      │ Throughput │");
+    println!("    ├────────────────────┼─────────┼──────────┼───────────┼────────────┤");
+    
+    for (i, worker) in workers.iter().enumerate() {
+        let separator = if i == workers.len() - 1 { "└" } else { "├" };
+        let line_char = if i == workers.len() - 1 { "┴" } else { "┼" };
+        
+        println!("    │ {:<18} │ {:>7} │ {:>8} │ {:>9} │ {:>10} │",
+            worker.name,
+            format_number(worker.files),
+            format_bytes_short(worker.bytes),
+            format!("{:.1}s", worker.duration_secs),
+            format!("{}/s", format_bytes_short(worker.throughput))
+        );
+        
+        if i < workers.len() - 1 {
+            println!("    ├────────────────────┼─────────┼──────────┼───────────┼────────────┤");
+        }
+    }
+    
+    println!("    └────────────────────┴─────────┴──────────┴───────────┴────────────┘");
+}
+
+/// Worker statistics
+pub struct WorkerStats {
+    pub name: String,
+    pub files: u64,
+    pub bytes: u64,
+    pub duration_secs: f32,
+    pub throughput: u64,
+}
+
+/// Create progress bar with custom style
+pub fn create_progress_bar(total: u64) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("\n  [{bar:40}] {pos}/{len} | {msg}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+    pb
+}
+
+/// Format number with thousands separator
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::new();
+    
+    for (i, &ch) in chars.iter().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    
+    result.chars().rev().collect()
+}
+
+/// Format bytes to human readable string
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let exponent = (bytes as f64).log(1024.0).floor() as usize;
+    let exponent = exponent.min(UNITS.len() - 1);
+    let value = bytes as f64 / 1024_f64.powi(exponent as i32);
+    if exponent == 0 {
+        format!("{} {}", bytes, UNITS[exponent])
+    } else {
+        format!("{:.1} {}", value, UNITS[exponent])
+    }
+}
+
+/// Format bytes to short form (for tables)
+fn format_bytes_short(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let exponent = (bytes as f64).log(1024.0).floor() as usize;
+    let exponent = exponent.min(UNITS.len() - 1);
+    let value = bytes as f64 / 1024_f64.powi(exponent as i32);
+    
+    if exponent == 0 {
+        format!("{} B", bytes)
+    } else if value >= 100.0 {
+        format!("{:.0} {}", value, UNITS[exponent])
+    } else if value >= 10.0 {
+        format!("{:.1} {}", value, UNITS[exponent])
+    } else {
+        format!("{:.2} {}", value, UNITS[exponent])
+    }
+}
