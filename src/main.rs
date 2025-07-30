@@ -97,13 +97,11 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("source")
                 .help("Source directory or file")
-                .required_unless_present_any(["shimmer-status", "pattern-stats", "test-shimmer-model"])
                 .value_parser(clap::value_parser!(PathBuf))
         )
         .arg(
             Arg::new("destination")
                 .help("Destination directory or file")
-                .required_unless_present_any(["shimmer-status", "pattern-stats", "test-shimmer-model", "export-patterns"])
                 .value_parser(clap::value_parser!(PathBuf))
         )
 
@@ -321,8 +319,8 @@ fn main() -> Result<()> {
             Arg::new("strategy")
                 .long("strategy")
                 .value_name("METHOD")
-                .help("Force a specific copy strategy: rsync, robocopy, platform, delta, parallel, io_uring, mixed, concurrent")
-                .value_parser(["rsync", "robocopy", "platform", "delta", "parallel", "io_uring", "mixed", "concurrent"])
+                .help("Force a specific copy strategy: rsync, robocopy, platform, delta, parallel, io_uring, mixed")
+                .value_parser(["rsync", "robocopy", "platform", "delta", "parallel", "io_uring", "mixed"])
         );
         
         let matches = matches.arg(
@@ -343,68 +341,7 @@ fn main() -> Result<()> {
                 .help("Skip based on checksum, not mod-time & size")
                 .action(clap::ArgAction::SetTrue)
         )
-        
-        // Shimmer AI integration options
-        .arg(
-            Arg::new("export-patterns")
-                .long("export-patterns")
-                .help("Export file patterns for Shimmer AI training")
-                .value_name("DIR")
-                .value_parser(clap::value_parser!(PathBuf))
-        )
-        .arg(
-            Arg::new("shimmer-model")
-                .long("shimmer-model")
-                .help("Use Shimmer AI model for strategy selection")
-                .value_name("MODEL_PATH")
-                .value_parser(clap::value_parser!(PathBuf))
-        )
-        .arg(
-            Arg::new("test-shimmer-model")
-                .long("test-shimmer-model")
-                .help("Test Shimmer model predictions")
-                .value_name("TEST_DATA")
-                .value_parser(clap::value_parser!(PathBuf))
-        )
-        .arg(
-            Arg::new("shimmer-status")
-                .long("shimmer-status")
-                .help("Show Shimmer integration status")
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("pattern-stats")
-                .long("pattern-stats")
-                .help("Show pattern collection statistics")
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("privacy-filter")
-                .long("privacy-filter")
-                .help("Enable privacy filtering for pattern export")
-                .action(clap::ArgAction::SetTrue)
-        )
         .get_matches();
-
-    // Handle Shimmer integration commands first
-    if matches.get_flag("shimmer-status") {
-        return handle_shimmer_status();
-    }
-    
-    if matches.get_flag("pattern-stats") {
-        return handle_pattern_stats();
-    }
-    
-    if let Some(export_dir) = matches.get_one::<PathBuf>("export-patterns") {
-        let source = matches.get_one::<PathBuf>("source")
-            .ok_or_else(|| anyhow::anyhow!("Source path required for pattern export"))?;
-        let privacy_filter = matches.get_flag("privacy-filter");
-        return handle_pattern_export(source, export_dir, privacy_filter);
-    }
-    
-    if let Some(test_data) = matches.get_one::<PathBuf>("test-shimmer-model") {
-        return handle_shimmer_test(test_data);
-    }
 
     // For regular sync operations, source and destination are required
     let source: PathBuf = matches.get_one::<PathBuf>("source")
@@ -427,7 +364,6 @@ fn main() -> Result<()> {
     let smart_mode = matches.get_flag("smart");
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
     let has_forced_strategy = forced_strategy.is_some();
-    let shimmer_model_path = matches.get_one::<PathBuf>("shimmer-model").cloned();
     #[cfg(target_os = "linux")]
     let linux_optimized = matches.get_flag("linux-optimized");
     #[cfg(not(target_os = "linux"))]
@@ -606,7 +542,6 @@ fn main() -> Result<()> {
         #[cfg(target_os = "linux")]
         linux_optimized,
         forced_strategy,
-        shimmer_model_path,
     };
 
     if smart_mode || has_forced_strategy {
@@ -639,260 +574,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// Shimmer integration handlers
-fn handle_shimmer_status() -> Result<()> {
-    use robosync::shimmer_integration::PatternExporter;
-    use robosync::shared_paths;
-    use std::fs;
-    
-    println!("=== Shimmer Integration Status ===\n");
-    
-    // Check if shared directory exists
-    let shared_dir = Path::new(shared_paths::SHARED_BASE);
-    if shared_dir.exists() {
-        println!("✓ Shared directory exists");
-        
-        // Check for pattern exports
-        let patterns_dir = shared_paths::patterns_dir();
-        if patterns_dir.exists() {
-            let pattern_count = fs::read_dir(&patterns_dir)?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
-                .count();
-            println!("✓ Pattern exports: {} files", pattern_count);
-        } else {
-            println!("✗ No pattern exports found");
-        }
-        
-        // Check for models
-        let models_dir = shared_paths::models_dir();
-        if models_dir.exists() {
-            let model_files: Vec<_> = fs::read_dir(&models_dir)?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
-                .collect();
-            
-            if model_files.is_empty() {
-                println!("✗ No Shimmer models found");
-            } else {
-                println!("✓ Shimmer models found:");
-                for entry in model_files {
-                    println!("  - {}", entry.file_name().to_string_lossy());
-                }
-            }
-        } else {
-            println!("✗ Models directory not found");
-        }
-    } else {
-        println!("✗ Shared directory not found - run pattern export first");
-    }
-    
-    // Check project sync status
-    let sync_file = shared_paths::project_sync_file();
-    if sync_file.exists() {
-        println!("\n✓ Project sync file found");
-        // Could parse and display more details here
-    } else {
-        println!("\n✗ Project sync file not found");
-    }
-    
-    println!("\nTo export patterns: robosync <source> --export-patterns {}", shared_paths::patterns_dir().display());
-    println!("To use Shimmer model: robosync <source> <dest> --shimmer-model {}", shared_paths::default_shimmer_model().display());
-    
-    Ok(())
-}
-
-fn handle_pattern_stats() -> Result<()> {
-    use robosync::shared_paths;
-    use std::fs;
-    
-    println!("=== Pattern Collection Statistics ===\n");
-    
-    let patterns_dir = shared_paths::patterns_dir();
-    if !patterns_dir.exists() {
-        println!("No patterns collected yet.");
-        println!("Run: robosync <source> --export-patterns {}", shared_paths::patterns_dir().display());
-        return Ok(());
-    }
-    
-    let mut total_patterns = 0;
-    let mut file_count = 0;
-    let mut strategy_counts = std::collections::HashMap::new();
-    
-    for entry in fs::read_dir(patterns_dir)? {
-        let entry = entry?;
-        if entry.path().extension().map_or(false, |ext| ext == "json") {
-            file_count += 1;
-            
-            // Parse the file to get statistics
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(export) = serde_json::from_str::<robosync::shimmer_integration::PatternExport>(&content) {
-                    total_patterns += export.patterns.len();
-                    
-                    for pattern in &export.patterns {
-                        *strategy_counts.entry(pattern.strategy.clone()).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-    }
-    
-    println!("Export files: {}", file_count);
-    println!("Total patterns: {}", total_patterns);
-    
-    if !strategy_counts.is_empty() {
-        println!("\nStrategy distribution:");
-        for (strategy, count) in strategy_counts {
-            println!("  {}: {} ({:.1}%)", 
-                strategy, 
-                count, 
-                (count as f64 / total_patterns as f64) * 100.0
-            );
-        }
-    }
-    
-    Ok(())
-}
-
-fn handle_pattern_export(source: &Path, export_dir: &Path, privacy_filter: bool) -> Result<()> {
-    use robosync::shimmer_integration::PatternExporter;
-    use robosync::file_list::generate_file_list_with_options;
-    use robosync::strategy::{FileStats, StrategySelector};
-    use robosync::options::SyncOptions;
-    
-    println!("=== Pattern Export for Shimmer Training ===\n");
-    println!("Source: {}", source.display());
-    println!("Export directory: {}", export_dir.display());
-    if privacy_filter {
-        println!("Privacy filter: ENABLED");
-    }
-    
-    // Create exporter
-    let mut exporter = PatternExporter::new(export_dir.to_path_buf())?;
-    
-    // Analyze source directory
-    let options = SyncOptions::default();
-    let files = generate_file_list_with_options(source, &options)?;
-    
-    // Calculate file statistics
-    let mut stats = FileStats::default();
-    stats.total_files = files.len();
-    
-    for file in &files {
-        stats.total_size += file.size;
-        if file.size <= 256 * 1024 {
-            stats.small_files += 1;
-        } else if file.size <= 10 * 1024 * 1024 {
-            stats.medium_files += 1;
-        } else {
-            stats.large_files += 1;
-        }
-    }
-    
-    stats.avg_size = if stats.total_files > 0 {
-        stats.total_size / stats.total_files as u64
-    } else {
-        0
-    };
-    
-    // Create pattern
-    let is_network = robosync::strategy::is_network_path(source);
-    let pattern = robosync::shimmer_integration::FilePattern::from_stats(&stats, is_network);
-    
-    // Select strategy (for recording purposes)
-    let selector = StrategySelector::new();
-    let strategy = selector.choose_strategy(&stats, source, source, &options);
-    
-    // Record the pattern
-    let dummy_stats = robosync::sync_stats::SyncStats::default();
-    let duration = std::time::Duration::from_secs(0);
-    exporter.record_sync(pattern, &strategy, &dummy_stats, duration)?;
-    
-    // Export immediately
-    let export_path = exporter.export()?;
-    
-    println!("\n✓ Pattern exported successfully");
-    println!("Export file: {}", export_path.display());
-    println!("Total files analyzed: {}", stats.total_files);
-    println!("Strategy selected: {:?}", strategy);
-    
-    // Update project sync status
-    update_project_sync_status("pattern_export", &export_path)?;
-    
-    Ok(())
-}
-
-fn handle_shimmer_test(test_data: &Path) -> Result<()> {
-    use robosync::shimmer_strategy_bridge::create_shimmer_strategy_selector;
-    
-    println!("=== Testing Shimmer Model ===\n");
-    
-    let selector = create_shimmer_strategy_selector()?;
-    
-    // Load test data (simplified for now)
-    println!("Test data: {}", test_data.display());
-    println!("Model loaded successfully");
-    
-    // Would implement actual test logic here
-    println!("\nTest functionality not yet implemented.");
-    println!("This will compare Shimmer predictions against heuristic strategies.");
-    
-    Ok(())
-}
-
-fn update_project_sync_status(action: &str, data: &Path) -> Result<()> {
-    use robosync::shared_paths;
-    use std::fs;
-    use chrono::Utc;
-    
-    let sync_file = shared_paths::project_sync_file();
-    
-    // Ensure directory exists
-    if let Some(parent) = sync_file.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    
-    // Read existing or create new
-    let mut sync_data = if sync_file.exists() {
-        let content = fs::read_to_string(&sync_file)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({
-            "last_sync": Utc::now().to_rfc3339(),
-            "projects": {},
-            "messages": [],
-            "pending_tasks": []
-        })
-    };
-    
-    // Update based on action
-    match action {
-        "pattern_export" => {
-            sync_data["projects"]["robosync"]["last_pattern_export"] = serde_json::Value::String(Utc::now().to_rfc3339());
-            sync_data["projects"]["robosync"]["patterns_collected"] = serde_json::Value::Number(
-                sync_data["projects"]["robosync"]["patterns_collected"].as_u64().unwrap_or(0).wrapping_add(1).into()
-            );
-            
-            // Add message
-            if let Some(messages) = sync_data["messages"].as_array_mut() {
-                messages.push(serde_json::json!({
-                    "timestamp": Utc::now().to_rfc3339(),
-                    "type": "pattern_export",
-                    "from": "robosync",
-                    "data": {
-                        "export_path": data.to_string_lossy()
-                    }
-                }));
-            }
-        }
-        _ => {}
-    }
-    
-    // Write back
-    fs::write(sync_file, serde_json::to_string_pretty(&sync_data)?)?;
-    
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

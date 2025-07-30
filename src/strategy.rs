@@ -41,8 +41,6 @@ pub enum CopyStrategy {
     },
     /// Mixed mode - uses different strategies for different file types
     MixedMode,
-    /// Concurrent mixed mode - processes different file types simultaneously
-    ConcurrentMixed,
 }
 
 /// Platform-specific copy methods
@@ -186,14 +184,14 @@ impl StrategySelector {
         
         // Decision tree for strategy selection
         match (stats.total_files, stats.avg_size, is_network) {
-            // Large diverse file set - use concurrent mixed mode for optimal performance
+            // Large diverse file set - use mixed mode for optimal performance
             (1000.., _, false) if stats.small_files > 100 && stats.large_files > 0 => {
-                CopyStrategy::ConcurrentMixed
+                CopyStrategy::MixedMode
             }
             
-            // Medium diverse file set - also use concurrent mixed mode
+            // Medium diverse file set - also use mixed mode
             (100.., _, false) if stats.small_files > 50 && (stats.medium_files > 10 || stats.large_files > 0) => {
-                CopyStrategy::ConcurrentMixed
+                CopyStrategy::MixedMode
             }
             
             // Thousands of small files locally - use native tools
@@ -395,9 +393,6 @@ impl StrategySelector {
             }
             CopyStrategy::MixedMode => {
                 "Mixed mode (parallel for small, platform API for medium, delta for large)".to_string()
-            }
-            CopyStrategy::ConcurrentMixed => {
-                "Concurrent mixed mode (simultaneous processing of all file types)".to_string()
             }
         }
     }

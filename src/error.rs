@@ -71,14 +71,6 @@ pub enum RoboSyncError {
         attempted_strategy: Option<String>,
     },
 
-    /// Shimmer AI integration errors
-    #[error("Shimmer AI error: {operation} failed")]
-    ShimmerError {
-        operation: String, // "model_load", "prediction", "pattern_export", etc.
-        message: String,
-        #[source]
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
 
     /// Thread pool or parallel processing errors
     #[error("Parallel processing error: {message}")]
@@ -203,18 +195,6 @@ impl RoboSyncError {
         }
     }
 
-    /// Create a Shimmer AI error
-    pub fn shimmer_error(
-        operation: impl Into<String>,
-        message: impl Into<String>,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        Self::ShimmerError {
-            operation: operation.into(),
-            message: message.into(),
-            source,
-        }
-    }
 
     /// Create a parallel processing error
     pub fn parallel_error(message: impl Into<String>, thread_count: Option<usize>) -> Self {

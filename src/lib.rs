@@ -27,7 +27,6 @@ pub mod sync;
 pub mod sync_stats;
 pub mod unified_progress;
 pub mod mixed_strategy;
-pub mod concurrent_mixed_strategy;
 pub mod simple_progress;
 pub mod fast_file_list;
 // Core file synchronization modules only

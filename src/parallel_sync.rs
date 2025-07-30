@@ -31,7 +31,6 @@ use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
 use crate::unified_progress::UnifiedProgressManager;
 use crate::mixed_strategy::MixedStrategyExecutor;
-use crate::concurrent_mixed_strategy::ConcurrentMixedStrategy;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 /// Configuration for multithreaded synchronization
@@ -160,8 +159,8 @@ impl ParallelSyncer {
                     CopyStrategy::MixedMode
                 }
                 "concurrent" => {
-                    println!("Using forced strategy: concurrent mixed mode");
-                    CopyStrategy::ConcurrentMixed
+                    println!("Using forced strategy: mixed mode");
+                    CopyStrategy::MixedMode
                 }
                 _ => {
                     eprintln!("Unknown strategy '{}', using automatic selection", forced);
@@ -179,7 +178,7 @@ impl ParallelSyncer {
         let strategy_for_recording = strategy.clone();
         
         // Create unified progress manager (but not for mixed modes which have their own)
-        let use_mixed_mode = matches!(strategy, CopyStrategy::MixedMode | CopyStrategy::ConcurrentMixed);
+        let use_mixed_mode = matches!(strategy, CopyStrategy::MixedMode);
         let progress_manager = if options.no_progress || use_mixed_mode {
             None
         } else {
@@ -297,19 +296,6 @@ impl ParallelSyncer {
                 executor.execute(operations, &source, &destination, &options)
             }
             
-            CopyStrategy::ConcurrentMixed => {
-                println!("Using concurrent mixed mode strategy for maximum performance...");
-                
-                // Collect all operations
-                let operations = self.collect_operations(&source, &destination, &options)?;
-                
-                // Execute concurrent mixed strategy
-                let executor = ConcurrentMixedStrategy::new(
-                    file_stats.total_files as u64,
-                    file_stats.total_size,
-                );
-                executor.execute(operations, &source, &destination, &options)
-            }
         };
         
         // Finish progress tracking

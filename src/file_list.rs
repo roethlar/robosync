@@ -900,7 +900,6 @@ mod tests {
             forced_strategy: None,
             #[cfg(target_os = "linux")]
             linux_optimized: false,
-            shimmer_model_path: None,
         };
 
         let root = std::path::Path::new("/test");
