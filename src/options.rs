@@ -1,7 +1,6 @@
 //! Synchronization options and configuration
 
 use crate::compression::CompressionConfig;
-use std::path::PathBuf;
 
 /// Symlink handling behavior
 #[derive(Debug, Clone, PartialEq)]

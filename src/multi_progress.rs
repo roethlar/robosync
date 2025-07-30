@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::io::{self, Write};
-use crossterm::{cursor, terminal, ExecutableCommand, QueueableCommand};
+use crossterm::{cursor, terminal, QueueableCommand};
 
 /// Worker status for multi-line display
 #[derive(Clone)]

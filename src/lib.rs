@@ -30,6 +30,8 @@ pub mod fast_file_list;
 pub mod multi_progress;
 pub mod scrolling_progress;
 pub mod formatted_display;
+pub mod color_output;
+pub mod error_report;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]

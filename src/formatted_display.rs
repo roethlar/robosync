@@ -1,9 +1,9 @@
 //! Formatted display output for RoboSync
 
-use std::io::{self, Write};
-use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::sync_stats::SyncStats;
+use crate::color_output::ConditionalColor;
+use crossterm::style::Color;
 
 /// Display formatted header
 pub fn print_header(version: &str, source: &str, dest: &str, include: &str, exclude: &[String], options: &str) {
@@ -50,24 +50,30 @@ pub fn print_file_analysis(
     medium_size: u64,
     large_size: u64,
 ) {
-    println!("\n  File Analysis Complete:");
-    println!("    ╭────────┬────────────┬───────────┬───────────┬───────────╮");
-    println!("    │        │ Total      │ Small     │ Medium    │ Large     │");
-    println!("    ├────────┼────────────┼───────────┼───────────┼───────────┤");
-    println!("    │ Files  │ {:>10} │ {:>9} │ {:>9} │ {:>9} │",
-        format_number(total_files),
-        format_number(small_files),
-        format_number(medium_files),
-        format_number(large_files)
+    println!("\n     {}", "File Analysis Complete:".color_bold_if(Color::Cyan));
+    println!();
+    println!("     {}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+        "Files:".color_if(Color::White),
+        format_number(total_files).color_bold_if(Color::White),
+        "total".color_if(Color::White),
+        format_number(small_files).color_if(Color::Green),
+        "small".color_if(Color::Green),
+        format_number(medium_files).color_if(Color::Yellow),
+        "medium".color_if(Color::Yellow),
+        format_number(large_files).color_if(Color::Red),
+        "large".color_if(Color::Red)
     );
-    println!("    ├────────┼────────────┼───────────┼───────────┼───────────┤");
-    println!("    │ Size   │ {:>10} │ {:>9} │ {:>9} │ {:>9} │",
-        format_bytes(total_size),
-        format_bytes(small_size),
-        format_bytes(medium_size),
-        format_bytes(large_size)
+    println!("     {}   {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+        "Size:".color_if(Color::White),
+        format_bytes(total_size).color_bold_if(Color::White),
+        "total".color_if(Color::White),
+        format_bytes(small_size).color_if(Color::Green),
+        "small".color_if(Color::Green),
+        format_bytes(medium_size).color_if(Color::Yellow),
+        "medium".color_if(Color::Yellow),
+        format_bytes(large_size).color_if(Color::Red),
+        "large".color_if(Color::Red)
     );
-    println!("    └────────┴────────────┴───────────┴───────────┴───────────┘");
 }
 
 /// Display pending operations
@@ -89,66 +95,64 @@ pub fn print_pending_operations(
     let dirs_total = dirs_create + dirs_update + dirs_delete + dirs_skip;
     let size_total = size_create + size_update + size_delete + size_skip;
     
-    println!("\n  Pending Operations:");
-    println!("    ╭──────────┬────────┬────────┬─────────┬────────┬─────────╮");
-    println!("    │ Type     │ Create │ Update │ Delete  │ Skip   │ Total   │");
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Files    │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
-        format_number(files_create),
-        format_number(files_update),
-        format_number(files_delete),
-        format_number(files_skip),
-        format_number(files_total)
+    
+    
+    println!("\n     {}", "Pending Operations:".color_bold_if(Color::Cyan));
+    println!();
+    
+    // Simple list format - much cleaner
+    if files_create > 0 {
+        println!("     Files to create: {}", format_number(files_create).color_if(Color::Green));
+    }
+    if files_update > 0 {
+        println!("     Files to update: {}", format_number(files_update).color_if(Color::Yellow));
+    }
+    if files_delete > 0 {
+        println!("     Files to delete: {}", format_number(files_delete).color_if(Color::Red));
+    }
+    if dirs_create > 0 {
+        println!("     Directories to create: {}", format_number(dirs_create).color_if(Color::Green));
+    }
+    if dirs_delete > 0 {
+        println!("     Directories to delete: {}", format_number(dirs_delete).color_if(Color::Red));
+    }
+    
+    let total_operations = files_create + files_update + files_delete + dirs_create + dirs_delete;
+    println!("\n     Total: {} operations, {} transfer size", 
+        format_number(total_operations).color_bold_if(Color::White),
+        format_bytes_short(size_create + size_update).color_bold_if(Color::White)
     );
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Dirs     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
-        format_number(dirs_create),
-        format_number(dirs_update),
-        format_number(dirs_delete),
-        format_number(dirs_skip),
-        format_number(dirs_total)
-    );
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Size     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
-        format_bytes_short(size_create),
-        format_bytes_short(size_update),
-        format_bytes_short(size_delete),
-        format_bytes_short(size_skip),
-        format_bytes_short(size_total)
-    );
-    println!("    └──────────┴────────┴────────┴─────────┴────────┴─────────┘");
 }
 
 /// Display sync summary
 pub fn print_sync_summary(stats: &SyncStats, skipped_files: u64, skipped_dirs: u64, skipped_size: u64) {
-    println!("\n  Sync Summary:");
-    println!("    ╭──────────┬────────┬────────┬─────────┬────────┬─────────╮");
-    println!("    │ Type     │ Copied │ Updated│ Deleted │ Failed │ Skipped │");
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Files    │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+    println!("\n     {}", "Sync Summary:".color_bold_if(Color::Cyan));
+    println!();
+    println!("     {:>6} {:>8} {:>8} {:>8} {:>8} {:>9}", 
+        "", "Copied".color_if(Color::White), "Updated".color_if(Color::White), "Deleted".color_if(Color::White), "Failed".color_if(Color::White), "Skipped".color_if(Color::White));
+    println!("     {:>6} {:>8} {:>8} {:>8} {:>8} {:>9}", 
+        "──────", "────────", "────────", "────────", "────────", "─────────");
+    println!("     Files  {:>8} {:>8} {:>8} {:>8} {:>9}",
         format_number(stats.files_copied()),
         "0",  // Updated tracked separately in our case
         format_number(stats.files_deleted()),
         format_number(stats.errors()),
         format_number(skipped_files)
     );
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Dirs     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+    println!("     Dirs   {:>8} {:>8} {:>8} {:>8} {:>9}",
         "0",  // Dir stats not tracked separately
         "0",
         "0",
         "0",
         format_number(skipped_dirs)
     );
-    println!("    ├──────────┼────────┼────────┼─────────┼────────┼─────────┤");
-    println!("    │ Size     │ {:>6} │ {:>6} │ {:>7} │ {:>6} │ {:>7} │",
+    println!("     Size   {:>8} {:>8} {:>8} {:>8} {:>9}",
         format_bytes_short(stats.bytes_transferred()),
         "0 B",
         "0 B",
         "0 B",
         format_bytes_short(skipped_size)
     );
-    println!("    └──────────┴────────┴────────┴─────────┴────────┴─────────┘");
 }
 
 /// Display worker performance
@@ -157,29 +161,30 @@ pub fn print_worker_performance(workers: Vec<WorkerStats>) {
         return;
     }
     
-    println!("\n  Worker Performance:");
-    println!("    ╭────────────────────┬─────────┬──────────┬───────────┬────────────╮");
-    println!("    │ Worker             │ Files   │ Size     │ Time      │ Throughput │");
-    println!("    ├────────────────────┼─────────┼──────────┼───────────┼────────────┤");
+    println!("\n     {}", "Worker Performance:".color_bold_if(Color::Cyan));
+    println!();
     
-    for (i, worker) in workers.iter().enumerate() {
-        let separator = if i == workers.len() - 1 { "└" } else { "├" };
-        let line_char = if i == workers.len() - 1 { "┴" } else { "┼" };
-        
-        println!("    │ {:<18} │ {:>7} │ {:>8} │ {:>9} │ {:>10} │",
-            worker.name,
-            format_number(worker.files),
-            format_bytes_short(worker.bytes),
-            format!("{:.1}s", worker.duration_secs),
-            format!("{}/s", format_bytes_short(worker.throughput))
-        );
-        
-        if i < workers.len() - 1 {
-            println!("    ├────────────────────┼─────────┼──────────┼───────────┼────────────┤");
+    for worker in workers.iter() {
+        // Skip the "Delete operations" worker if it exists
+        if worker.name.contains("Delete") {
+            continue;
         }
+        
+        let worker_color = match worker.name.as_str() {
+            "Large" => Color::Red,
+            "Medium" => Color::Yellow,
+            "Small" => Color::Green,
+            _ => Color::White,
+        };
+        
+        println!("     {}: {} files, {} in {:.1}s ({}/s)",
+            worker.name.as_str().color_if(worker_color),
+            format_number(worker.files).color_if(Color::White),
+            format_bytes_short(worker.bytes).color_if(Color::White),
+            worker.duration_secs,
+            format_bytes_short(worker.throughput).as_str().color_if(Color::Cyan)
+        );
     }
-    
-    println!("    └────────────────────┴─────────┴──────────┴───────────┴────────────┘");
 }
 
 /// Worker statistics

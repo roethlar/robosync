@@ -3,13 +3,11 @@
 //! This module implements the smart decision engine that chooses the optimal
 //! copying method based on file characteristics, platform, and operation type.
 
-use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
 use crate::file_list::FileInfo;
 use crate::options::SyncOptions;
-use crate::progress::ProgressTracker;
 
 /// Represents different copy strategies available
 #[derive(Debug, Clone)]

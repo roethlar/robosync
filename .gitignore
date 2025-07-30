@@ -5,3 +5,27 @@ Cargo.lock
 .vscode/
 .idea/
 *.tmp
+.crush/
+
+# Test artifacts
+test_results.md
+test_all_options.sh
+test_*
+debug_*
+
+# Session/context files
+*session*.txt
+*context*.txt
+*archive*.txt
+*grok*.txt
+
+# Editor/AI assistant files
+.grok/
+.claude/
+claude-suggestions.md
+lint_report.md
+
+# Temporary files
+*.tmp
+*.temp
+*.log

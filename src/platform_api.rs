@@ -5,7 +5,7 @@
 //! - Linux: copy_file_range for zero-copy transfers
 //! - macOS: copyfile preserving all metadata and resource forks
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -133,7 +133,6 @@ impl PlatformCopier {
     #[cfg(target_os = "linux")]
     fn copy_file_linux(&self, source: &Path, dest: &Path) -> Result<u64> {
         use std::fs::{File, OpenOptions};
-        use std::os::unix::io::AsRawFd;
         
         let src_file = File::open(source)?;
         let mut dst_file = OpenOptions::new()
@@ -345,8 +344,8 @@ impl PlatformCopier {
     
     /// Copy multiple files using platform APIs
     pub fn copy_files(&self, files: &[(PathBuf, PathBuf)]) -> Result<SyncStats> {
-        let mut stats = SyncStats::default();
-        let total_files = files.len();
+        let stats = SyncStats::default();
+        let _total_files = files.len();
         
         for (i, (source, dest)) in files.iter().enumerate() {
             // Don't update percentage here - let the main progress logic handle it

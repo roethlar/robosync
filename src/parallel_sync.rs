@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -30,8 +29,9 @@ use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
 use crate::mixed_strategy::MixedStrategyExecutor;
-use crate::formatted_display;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use crate::color_output::ConditionalColor;
+use crossterm::style::Color;
 
 /// Format number with thousands separator
 fn format_number(n: u64) -> String {
@@ -101,6 +101,31 @@ impl ParallelSyncer {
     pub fn new(config: ParallelSyncConfig) -> Self {
         Self { config }
     }
+
+    /// Execute mixed mode directly without file analysis
+    fn execute_mixed_mode_direct(
+        &self,
+        source: PathBuf,
+        destination: PathBuf,
+        options: SyncOptions,
+    ) -> Result<SyncStats> {
+        // Go straight to mixed mode execution
+        let operations = self.collect_operations(&source, &destination, &options)?;
+        
+        // We need file count for the executor, but we can get it from operations
+        let total_files = operations.len() as u64;
+        let total_bytes = operations.iter()
+            .map(|op| match op {
+                FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .sum();
+
+        let executor = MixedStrategyExecutor::new(total_files, total_bytes);
+        executor.execute(operations, &source, &destination, &options)
+    }
     
     /// Synchronize using intelligent strategy selection
     pub fn synchronize_smart(
@@ -109,9 +134,25 @@ impl ParallelSyncer {
         destination: PathBuf,
         options: SyncOptions,
     ) -> Result<SyncStats> {
-        println!("  🔍 RoboSync Smart Mode: Analyzing files to choose optimal strategy...");
+        // Check if we're forcing mixed mode (default behavior)
+        if let Some(ref forced) = options.forced_strategy {
+            if forced == "mixed" {
+                // Skip analysis and go straight to mixed mode
+                return self.execute_mixed_mode_direct(source, destination, options);
+            }
+        }
+
+        // Create a spinner for file analysis (only for diagnostic modes)
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("  {spinner} RoboSync Diagnostic Mode: Analyzing files for strategy selection...")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        );
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         
-        // First, analyze the files to determine the best strategy
+        // Analyze the files to determine the best strategy (diagnostic modes only)
         let source_files = if source.is_dir() {
             #[cfg(target_os = "linux")]
             let files = if options.linux_optimized {
@@ -138,25 +179,34 @@ impl ParallelSyncer {
         // Calculate statistics
         let file_stats = FileStats::from_operations(&source_files);
         
-        println!("\n  File Analysis Complete:");
-        println!("    ╭────────┬────────────┬───────────┬───────────┬─────────╮");
-        println!("    │ Files  │ T: {:>6}  │ S: {:>6} │ M: {:>6} │ L: {:>3} │", 
-            format_number(file_stats.total_files as u64),
-            format_number(file_stats.small_files as u64),
-            format_number(file_stats.medium_files as u64),
-            format_number(file_stats.large_files as u64)
+        // Stop the spinner
+        spinner.finish_and_clear();
+        
+        println!("\n     {}", "File Analysis Complete:".color_bold_if(Color::Cyan));
+        println!();
+        println!("     {}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+            "Files:".color_if(Color::White),
+            format_number(file_stats.total_files as u64).color_bold_if(Color::White),
+            "total".color_if(Color::White),
+            format_number(file_stats.small_files as u64).color_if(Color::Green),
+            "small".color_if(Color::Green),
+            format_number(file_stats.medium_files as u64).color_if(Color::Yellow),
+            "medium".color_if(Color::Yellow),
+            format_number(file_stats.large_files as u64).color_if(Color::Red),
+            "large".color_if(Color::Red)
         );
-        println!("    ├────────┼────────────┴───────────┼───────────┴─────────┤");
         let avg_size_str = if file_stats.total_files > 0 {
             humanize_bytes(file_stats.avg_size)
         } else {
             "0 B".to_string()
         };
-        println!("    │ Size   │ T: {:>15}     │ A: {:>15}  │", 
-            humanize_bytes(file_stats.total_size),
-            avg_size_str
+        println!("     {}   {:>8} {}   ({} {})",
+            "Size:".color_if(Color::White),
+            humanize_bytes(file_stats.total_size).color_bold_if(Color::White),
+            "total".color_if(Color::White),
+            "average:".color_if(Color::DarkGrey),
+            avg_size_str.as_str().color_if(Color::White)
         );
-        println!("    └────────┴────────────────────────┴─────────────────────┘");
         
         // Choose strategy using intelligent heuristics
         let strategy = if let Some(ref forced) = options.forced_strategy {
@@ -164,54 +214,46 @@ impl ParallelSyncer {
             let selector = StrategySelector::new();
             match forced.as_str() {
                 "rsync" => {
-                    println!("  Using forced strategy: rsync");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: rsync");
                     CopyStrategy::NativeRsync {
                         extra_args: selector.build_rsync_args(&options),
                     }
                 }
                 "robocopy" => {
-                    println!("  Using forced strategy: robocopy");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: robocopy");
                     CopyStrategy::NativeRobocopy {
                         extra_args: selector.build_robocopy_args(&options),
                     }
                 }
                 "platform" => {
-                    println!("  Using forced strategy: platform API");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: platform API");
                     selector.platform_api_strategy()
                 }
                 "delta" => {
-                    println!("  Using forced strategy: delta transfer");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: delta transfer");
                     CopyStrategy::DeltaTransfer {
                         block_size: selector.optimal_block_size(file_stats.avg_size),
                     }
                 }
                 "parallel" => {
-                    println!("  Using forced strategy: parallel");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: parallel");
                     CopyStrategy::ParallelCustom {
                         threads: selector.optimal_thread_count(false),
                     }
                 }
                 #[cfg(target_os = "linux")]
                 "io_uring" => {
-                    println!("  Using forced strategy: io_uring");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: io_uring");
                     CopyStrategy::IoUringBatch {
                         batch_size: 256,
                     }
                 }
                 "mixed" => {
-                    println!("  Using forced strategy: mixed mode");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: mixed mode");
                     CopyStrategy::MixedMode
                 }
                 "concurrent" => {
-                    println!("  Using forced strategy: mixed mode");
-                    println!("  ───────────────────────────────────────────────────────────────────────────────");
+                    println!("     Using forced strategy: mixed mode");
                     CopyStrategy::MixedMode
                 }
                 _ => {
@@ -222,13 +264,14 @@ impl ParallelSyncer {
         } else {
             let selector = StrategySelector::new();
             let chosen = selector.choose_strategy(&file_stats, &source, &destination, &options);
-            println!("  Automatically selected strategy: {}", selector.describe_strategy(&chosen));
-            println!("  ───────────────────────────────────────────────────────────────────────────────");
+            println!("     {} {}", 
+                "Automatically selected strategy:".color_if(Color::White), 
+                selector.describe_strategy(&chosen).color_bold_if(Color::Cyan));
             chosen
         };
         
         // Clone strategy for later use in pattern recording
-        let strategy_for_recording = strategy.clone();
+        let _strategy_for_recording = strategy.clone();
         
         // Create unified progress manager (but not for mixed modes which have their own)
         let use_mixed_mode = matches!(strategy, CopyStrategy::MixedMode);
@@ -263,9 +306,9 @@ impl ParallelSyncer {
                 }
             }
             
-            CopyStrategy::NativeRobocopy { extra_args } => {
+            CopyStrategy::NativeRobocopy { extra_args: _ } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
-                let executor = NativeToolExecutor::new(options.dry_run);
+                let _executor = NativeToolExecutor::new(options.dry_run);
                 
                 #[cfg(target_os = "windows")]
                 {
@@ -283,7 +326,7 @@ impl ParallelSyncer {
                 }
             }
             
-            CopyStrategy::PlatformApi { method } => {
+            CopyStrategy::PlatformApi { method: _ } => {
                 println!("Using platform-specific APIs for optimal performance...");
                 let mut copier = PlatformCopier::new();
                 
@@ -336,7 +379,7 @@ impl ParallelSyncer {
             }
             
             CopyStrategy::MixedMode => {
-                println!("Using mixed mode strategy for optimal performance...");
+                // Using mixed mode strategy
                 
                 // Collect all operations
                 let operations = self.collect_operations(&source, &destination, &options)?;
@@ -368,7 +411,7 @@ impl ParallelSyncer {
         destination: &Path,
         options: &SyncOptions,
     ) -> Result<Vec<FileOperation>> {
-        println!("  🔍 Starting fast file enumeration...");
+        // Starting fast file enumeration
         
         // Create fast enumeration configuration
         let enum_config = FastEnumConfig {
@@ -380,17 +423,17 @@ impl ParallelSyncer {
         
         let generator = FastFileListGenerator::new(enum_config);
         
-        println!("Enumerating source files...");
+        // Enumerating source files
         let source_files = generator.generate_file_list(source, options)?;
         
         let dest_files = if destination.exists() {
-            println!("Enumerating destination files...");
+            // Enumerating destination files
             generator.generate_file_list(destination, options)?
         } else {
             Vec::new()
         };
         
-        println!("Comparing file lists...");
+        // Comparing file lists
         let operations = compare_file_lists_fast(
             &source_files,
             &dest_files,
@@ -400,7 +443,7 @@ impl ParallelSyncer {
             None, // No progress for now since this is fast
         );
         
-        println!("Generated {} operations", operations.len());
+        // Generated operations
         Ok(operations)
     }
 
@@ -518,8 +561,7 @@ impl ParallelSyncer {
             stats.bytes_transferred()
         };
         
-        println!("\n  ───────────────────────────────────────────────────────────────────────────────");
-        println!("\n  ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+        println!("\n     ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
             elapsed.as_secs_f32(),
             format_number(stats.files_copied()),
             humanize_bytes(stats.bytes_transferred()),
@@ -1135,7 +1177,6 @@ impl ParallelSyncer {
                     println!("DEBUG: Using optimized batch copy for {} files", file_pairs.len());
                     
                     // Use memory-mapped files for now until io_uring is fully working
-                    use memmap2::MmapOptions;
                     const SMALL_FILE_THRESHOLD: usize = 64 * 1024;
                     
                     let mut total_bytes_copied = 0u64;
@@ -1546,8 +1587,8 @@ impl ParallelSyncer {
                     .try_for_each(|operation| -> Result<()> {
                         // Clone logger reference for thread safety
                         let logger_ref = Arc::clone(&logger_arc);
-                        let progress_ref = progress_arc.clone();
-                        let file_stats = self.execute_operation_parallel(
+                        let _progress_ref = progress_arc.clone();
+                        let _file_stats = self.execute_operation_parallel(
                             operation.clone(),
                             source,
                             destination,
@@ -1601,10 +1642,9 @@ impl ParallelSyncer {
             final_stats.bytes_transferred()
         };
         
-        println!("\n  ───────────────────────────────────────────────────────────────────────────────");
         
         if final_stats.files_deleted() > 0 {
-            println!("\n  ✅ Completed in {:.1}s: {} files copied, {} files deleted, {} transferred ({}/s)",
+            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(final_stats.files_copied()),
                 format_number(final_stats.files_deleted()),
@@ -1612,7 +1652,7 @@ impl ParallelSyncer {
                 humanize_bytes(throughput)
             );
         } else {
-            println!("\n  ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(final_stats.files_copied()),
                 humanize_bytes(final_stats.bytes_transferred()),

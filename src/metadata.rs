@@ -4,6 +4,11 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
+use crate::error_report::ErrorReportHandle;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Global counters for metadata warnings
+static METADATA_WARNING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -54,7 +59,87 @@ pub fn copy_file_with_metadata(
     destination: &Path,
     flags: &CopyFlags,
 ) -> Result<u64> {
-    copy_file_with_metadata_internal(source, destination, flags, None)
+    copy_file_with_metadata_and_reporter(source, destination, flags, None)
+}
+
+/// Copy a file with specified metadata preservation and error reporting
+pub fn copy_file_with_metadata_and_reporter(
+    source: &Path,
+    destination: &Path,
+    flags: &CopyFlags,
+    error_reporter: Option<&ErrorReportHandle>,
+) -> Result<u64> {
+    // Check if source is a symlink first
+    let source_metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
+    
+    if source_metadata.is_symlink() {
+        return copy_symlink_with_metadata(source, destination, flags);
+    }
+    
+    // First, let's copy the file data - this is the critical part
+    let bytes_copied = if flags.data {
+        streaming_copy_optimized(source, destination)?
+    } else {
+        return Err(anyhow::anyhow!("Data flag (D) must be set for file copying"));
+    };
+    
+    // Now apply metadata - these are less critical and some may fail due to permissions
+    let metadata = fs::metadata(source)
+        .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
+    
+    // Apply each type of metadata, but don't fail the whole operation for non-critical errors
+    if flags.timestamps {
+        if let Err(e) = copy_timestamps(source, destination, &metadata) {
+            if error_reporter.is_none() {
+                METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let msg = format!("Failed to preserve timestamps: {}", e);
+                error_reporter.unwrap().add_warning(destination, &msg);
+            }
+        }
+    }
+    
+    if flags.security {
+        if let Err(e) = copy_permissions(source, destination, &metadata) {
+            if error_reporter.is_none() {
+                METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let msg = format!("Failed to preserve permissions: {}", e);
+                error_reporter.unwrap().add_warning(destination, &msg);
+            }
+        }
+    }
+    
+    if flags.attributes {
+        if let Err(e) = copy_attributes(source, destination, &metadata) {
+            if error_reporter.is_none() {
+                METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let msg = format!("Failed to preserve attributes: {}", e);
+                error_reporter.unwrap().add_warning(destination, &msg);
+            }
+        }
+    }
+    
+    #[cfg(unix)]
+    if flags.owner {
+        if let Err(e) = copy_ownership(source, destination, &metadata) {
+            if error_reporter.is_none() {
+                METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let msg = format!("Failed to preserve ownership: {} (requires appropriate privileges)", e);
+                error_reporter.unwrap().add_warning(destination, &msg);
+            }
+        }
+    }
+    
+    Ok(bytes_copied)
+}
+
+/// Get the current metadata warning count and reset it
+pub fn get_and_reset_metadata_warning_count() -> usize {
+    METADATA_WARNING_COUNT.swap(0, Ordering::Relaxed)
 }
 
 /// Fast copy that only copies data without metadata for maximum performance
@@ -67,62 +152,13 @@ pub fn copy_file_with_metadata_with_warnings(
     source: &Path,
     destination: &Path,
     flags: &CopyFlags,
-    warnings: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    _warnings: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<u64> {
-    copy_file_with_metadata_internal(source, destination, flags, Some(warnings))
+    // Just use the regular function which now handles warnings internally
+    copy_file_with_metadata(source, destination, flags)
 }
 
-/// Internal implementation for copy_file_with_metadata
-fn copy_file_with_metadata_internal(
-    source: &Path,
-    destination: &Path,
-    flags: &CopyFlags,
-    warnings: Option<&std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
-) -> Result<u64> {
-    // Check if source is a symlink - if so, use symlink-specific handling
-    let source_metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
-
-    if source_metadata.is_symlink() {
-        return copy_symlink_with_metadata(source, destination, flags);
-    }
-
-    // Always copy data if D flag is set (which it should be for file copies)
-    if !flags.data {
-        return Err(anyhow::anyhow!(
-            "Data flag (D) must be set for file copying"
-        ));
-    }
-
-    // Always use optimized copy for best performance
-    let bytes_copied = streaming_copy_optimized(source, destination)?;
-
-    // Get source metadata (now we know it's not a symlink, so we can use regular metadata)
-    let source_metadata = fs::metadata(source)
-        .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
-
-    // Apply metadata based on flags
-    if flags.timestamps {
-        copy_timestamps(source, destination, &source_metadata)?;
-    }
-
-    if flags.security {
-        copy_permissions(source, destination, &source_metadata)?;
-    }
-
-    if flags.attributes {
-        copy_attributes(source, destination, &source_metadata)?;
-    }
-
-    #[cfg(unix)]
-    if flags.owner {
-        copy_ownership(source, destination, &source_metadata)?;
-    }
-
-    // Auditing info (U flag) is filtered out during flag parsing, so no warning needed
-
-    Ok(bytes_copied)
-}
+// Internal implementation removed - logic moved to public function
 
 /// Copy a symlink with specified metadata preservation
 pub fn copy_symlink_with_metadata(
@@ -153,7 +189,8 @@ pub fn copy_symlink_with_metadata(
     {
         // On Unix, we can set ownership and some timestamps for symlinks
         if flags.owner {
-            copy_symlink_ownership(source, destination, &source_metadata)?;
+            // Try to copy ownership, but don't fail if it doesn't work (requires privileges)
+            let _ = copy_symlink_ownership(source, destination, &source_metadata);
         }
 
         // Timestamps for symlinks are generally not preserved as they're not very meaningful

@@ -355,7 +355,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                 // Skip symlinks entirely
                                 skip_file = true;
                                 FileInfo {
-                                    path: path,
+                                    path,
                                     size: metadata.len(),
                                     modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                     is_directory: metadata.is_dir(),
@@ -367,7 +367,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                             SymlinkBehavior::Preserve => {
                                 // Keep as symlink (default behavior)
                                 FileInfo {
-                                    path: path,
+                                    path,
                                     size: metadata.len(),
                                     modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                     is_directory: metadata.is_dir(),
@@ -385,7 +385,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                             // Failed to dereference, skip
                                             skip_file = true;
                                             FileInfo {
-                                                path: path,
+                                                path,
                                                 size: metadata.len(),
                                                 modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                                 is_directory: metadata.is_dir(),
@@ -399,7 +399,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                     // No target found, skip
                                     skip_file = true;
                                     FileInfo {
-                                        path: path,
+                                        path,
                                         size: metadata.len(),
                                         modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                         is_directory: metadata.is_dir(),
@@ -412,7 +412,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                         }
                     } else {
                         FileInfo {
-                            path: path,
+                            path,
                             size: metadata.len(),
                             modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                             is_directory: metadata.is_dir(),
@@ -548,10 +548,15 @@ fn matches_pattern(text: &str, pattern: &str) -> bool {
                 let remaining_pattern: String = pattern_chars.collect();
                 let remaining_text: String = text_chars.collect();
 
-                for i in 0..=remaining_text.len() {
+                // Use character indices instead of byte indices
+                for (i, _) in remaining_text.char_indices() {
                     if matches_pattern(&remaining_text[i..], &remaining_pattern) {
                         return true;
                     }
+                }
+                // Also check matching empty string at the end
+                if matches_pattern("", &remaining_pattern) {
+                    return true;
                 }
                 return false;
             }

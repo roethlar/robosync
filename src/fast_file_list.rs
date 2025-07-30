@@ -70,13 +70,13 @@ impl FastFileListGenerator {
     ) -> Result<Vec<FileInfo>> {
         let start_time = Instant::now();
         
-        println!("Starting fast file enumeration...");
+        // Starting fast file enumeration
         
         // Use platform-optimized implementation if available
         #[cfg(target_os = "linux")]
         if let Ok(files) = self.generate_with_jwalk(root, options) {
-            let elapsed = start_time.elapsed();
-            println!("Fast enumeration completed: {} files in {:.2}s", files.len(), elapsed.as_secs_f32());
+            let _elapsed = start_time.elapsed();
+            // Fast enumeration completed
             return Ok(files);
         }
 
@@ -213,10 +213,10 @@ impl FastFileListGenerator {
     /// Cross-platform optimized implementation using rayon
     fn generate_with_rayon(&self, root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
         // First, quickly enumerate all directory entries
-        println!("Scanning directory structure...");
+        // println!("Scanning directory structure...");
         let entries = self.collect_entries_fast(root)?;
         
-        println!("Processing {} entries...", entries.len());
+        // println!("Processing {} entries...", entries.len());
         
         if let Some(ref progress) = self.progress {
             progress.print_update();
@@ -293,7 +293,7 @@ impl FastFileListGenerator {
         let file_batches = files?;
         let all_files: Vec<FileInfo> = file_batches.into_iter().flatten().collect();
         
-        println!("Enumerated {} files", all_files.len());
+        // println!("Enumerated {} files", all_files.len());
         Ok(all_files)
     }
 
@@ -419,10 +419,15 @@ impl FastFileListGenerator {
                     let remaining_pattern: String = pattern_chars.collect();
                     let remaining_text: String = text_chars.collect();
 
-                    for i in 0..=remaining_text.len() {
+                    // Use character indices instead of byte indices
+                    for (i, _) in remaining_text.char_indices() {
                         if self.matches_pattern(&remaining_text[i..], &remaining_pattern) {
                             return true;
                         }
+                    }
+                    // Also check matching empty string at the end
+                    if self.matches_pattern("", &remaining_pattern) {
+                        return true;
                     }
                     return false;
                 }
@@ -452,7 +457,7 @@ pub fn compare_file_lists_fast(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    println!("Comparing {} source files with {} target files...", source.len(), target.len());
+    // Comparing source and target files
 
     // Build target map in parallel for faster lookup
     let target_map: HashMap<PathBuf, &FileInfo> = target
@@ -465,7 +470,7 @@ pub fn compare_file_lists_fast(
         })
         .collect();
 
-    println!("Built target lookup map with {} entries", target_map.len());
+    // Built target lookup map
 
     let processed_count = AtomicUsize::new(0);
     let last_update = Arc::new(Mutex::new(Instant::now()));
@@ -576,7 +581,7 @@ pub fn compare_file_lists_fast(
             }
 
             // Update progress
-            let count = processed_count.fetch_add(chunk.len(), Ordering::Relaxed);
+            let _count = processed_count.fetch_add(chunk.len(), Ordering::Relaxed);
             if let Some(ref progress) = progress {
                 let now = Instant::now();
                 let should_update = {
@@ -598,7 +603,7 @@ pub fn compare_file_lists_fast(
     let mut operations: Vec<FileOperation> = source_operations.into_iter().flatten().collect();
     let processed_targets: HashSet<PathBuf> = processed_targets.into_iter().flatten().collect();
 
-    println!("Generated {} operations from source comparison", operations.len());
+    // Generated operations from source comparison
 
     // Handle deletions if in purge mode
     if options.purge || options.mirror {
@@ -619,7 +624,7 @@ pub fn compare_file_lists_fast(
             })
             .collect();
 
-        println!("Added {} delete operations", delete_operations.len());
+        // println!("Added {} delete operations", delete_operations.len());
         operations.extend(delete_operations);
     }
 

@@ -1,6 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Arg, Command};
 use std::path::PathBuf;
+use robosync::color_output::ConditionalColor;
+use crossterm::style::Color;
 
 use robosync::compression::CompressionConfig;
 use robosync::options::{SyncOptions, SymlinkBehavior};
@@ -325,7 +327,7 @@ fn main() -> Result<()> {
         let matches = matches.arg(
             Arg::new("no-smart")
                 .long("no-smart")
-                .help("Disable intelligent strategy selection (use basic parallel mode)")
+                .help("Diagnostic: use basic parallel mode instead of mixed mode")
                 .action(clap::ArgAction::SetTrue)
         );
         
@@ -333,8 +335,8 @@ fn main() -> Result<()> {
             Arg::new("strategy")
                 .long("strategy")
                 .value_name("METHOD")
-                .help("Force a specific copy strategy: delta, mixed")
-                .value_parser(["delta", "mixed"])
+                .help("Diagnostic override: force a specific strategy (delta, mixed, rsync, robocopy, platform)")
+                .value_parser(["delta", "mixed", "rsync", "robocopy", "platform", "io_uring", "parallel"])
         );
         
         let matches = matches.arg(
@@ -384,9 +386,9 @@ fn main() -> Result<()> {
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
     let no_smart = matches.get_flag("no-smart");
-    let smart_mode = !no_smart;  // Smart mode is now default
+    let _smart_mode = !no_smart;  // Smart mode is now default (unused but kept for clarity)
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
-    let has_forced_strategy = forced_strategy.is_some();
+    let _has_forced_strategy = forced_strategy.is_some();
 
     // Parse symlink handling options
     let links = matches.get_flag("links");
@@ -473,98 +475,79 @@ fn main() -> Result<()> {
     let retry_count = matches.get_one::<u32>("retry-count").copied().unwrap_or(0);
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
-    // Print header with formatted output
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
-    println!("     RoboSync v{}: Fast parallel file synchronization", env!("CARGO_PKG_VERSION"));
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
-    println!("    ╭────────┬──────────────────────────────────────────────╮");
-    println!("    │ Source │ {:<44} │", source.display());
-    println!("    ├────────┼──────────────────────────────────────────────┤");
-    println!("    │ Dest   │ {:<44} │", destination.display());
-    println!("    ╰────────┴──────────────────────────────────────────────╯");
-
-    // Show active options
-    let mut options = Vec::new();
-    if recursive {
-        options.push("recursive");
-    }
-    if purge {
-        options.push("purge");
-    }
+    // Print header without lines
+    println!("     {} v{}: {}", 
+        "RoboSync".color_bold_if(Color::Cyan), 
+        env!("CARGO_PKG_VERSION").color_if(Color::White), 
+        "Fast parallel file synchronization".color_if(Color::White));
+    
+    // Calculate the max width needed for all content
+    let source_str = source.display().to_string();
+    let dest_str = destination.display().to_string();
+    
+    
+    // Build options string
+    let mut all_options = Vec::new();
     if mirror {
-        options.push("mirror");
+        all_options.push("--mir".to_string());
+    } else if empty_dirs {
+        all_options.push("-e".to_string());
+    } else if subdirs {
+        all_options.push("-s".to_string());
     }
-    let verbose_str = format!("verbose={verbose}");
-    if verbose > 0 {
-        options.push(&verbose_str);
-    }
-    if confirm {
-        options.push("confirm");
+    if archive {
+        all_options.push("-a".to_string());
     }
     if compress {
-        options.push("compress");
+        all_options.push("-z".to_string());
+    }
+    if checksum {
+        all_options.push("-c".to_string());
     }
     if move_files {
-        options.push("move-files");
+        all_options.push("--mov".to_string());
     }
-    if !exclude_files.is_empty() {
-        options.push("exclude-files");
+    if dry_run {
+        all_options.push("-n".to_string());
     }
-    if !exclude_dirs.is_empty() {
-        options.push("exclude-dirs");
+    if verbose > 0 {
+        all_options.push(format!("-{}", "v".repeat(verbose as usize)));
     }
-    if min_size.is_some() {
-        options.push("min-size");
+    if threads != num_cpus {
+        all_options.push(format!("--mt {}", threads));
     }
-    if max_size.is_some() {
-        options.push("max-size");
+    if retry_count > 0 {
+        all_options.push(format!("-r {} -w {}", retry_count, retry_wait));
     }
-
-    // Show exclude/include patterns if any
-    if !exclude_files.is_empty() {
-        println!("      Excl. : {}", exclude_files.join(" "));
-    }
-    if !exclude_dirs.is_empty() {
-        println!("      Excl. : {} (dirs)", exclude_dirs.join(" "));
+    if copy_all || archive {
+        all_options.push("--copyall".to_string());
+    } else if copy_flags != "DAT" {
+        all_options.push(format!("--copy {}", copy_flags));
     }
     
-    // Show options
-    if !options.is_empty() || !dry_run {
-        let mut all_options = Vec::new();
-        
-        // Add mode options
-        if mirror {
-            all_options.push("--mir");
-        } else if recursive {
-            all_options.push("-r");
-        }
-        if archive {
-            all_options.push("-a");
-        }
-        if compress {
-            all_options.push("-z");
-        }
-        if checksum {
-            all_options.push("-c");
-        }
-        if move_files {
-            all_options.push("--mov");
-        }
-        let verbose_str = format!("-{}", "v".repeat(verbose as usize));
-        if verbose > 0 {
-            all_options.push(&verbose_str);
-        }
-        let thread_str = format!("--mt {}", threads);
-        if !dry_run && threads != num_cpus {
-            all_options.push(&thread_str);
-        }
-        
-        if !all_options.is_empty() {
-            println!("    Options : {}", all_options.join(" "));
-        }
+    // Add exclude patterns to options
+    for excl in &exclude_files {
+        all_options.push(format!("--xf {}", excl));
+    }
+    for excl in &exclude_dirs {
+        all_options.push(format!("--xd {}", excl));
     }
     
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    let options_str = all_options.join(" ");
+    
+    // Find max width needed
+    let max_len = source_str.len()
+        .max(dest_str.len())
+        .max(options_str.len());
+    let _table_width = max_len.max(44) + 2; // At least 44 chars, plus padding
+    
+    // Display configuration
+    println!();
+    println!("     {}  {}", "Source:".color_if(Color::White), source_str.as_str().color_if(Color::Green));
+    println!("     {}    {}", "Dest:".color_if(Color::White), dest_str.as_str().color_if(Color::Yellow));
+    if !options_str.is_empty() {
+        println!("     {} {}", "Options:".color_if(Color::White), options_str.as_str().color_if(Color::DarkGrey));
+    }
 
     // Warn about dangerous combinations
     if move_files && mirror {
@@ -610,28 +593,35 @@ fn main() -> Result<()> {
         symlink_behavior,
     };
 
-    if smart_mode || has_forced_strategy {
-        // Use intelligent strategy selection or forced strategy (default path)
-        let config = ParallelSyncConfig {
-            worker_threads: threads,
-            io_threads: threads,
-            block_size,
-            max_parallel_files: threads * 2,
-        };
+    if !dry_run {
+        if sync_options.forced_strategy.is_some() {
+            // Diagnostic override - use legacy smart mode with specific strategy
+            let config = ParallelSyncConfig {
+                worker_threads: threads,
+                io_threads: threads,
+                block_size,
+                max_parallel_files: threads * 2,
+            };
 
-        let syncer = ParallelSyncer::new(config);
-        let _stats = syncer.synchronize_smart(source, destination, sync_options)?;
-    } else if !dry_run {
-        // Basic parallel mode (when --no-smart is used)
-        let config = ParallelSyncConfig {
-            worker_threads: threads,
-            io_threads: threads,
-            block_size,
-            max_parallel_files: threads * 2,
-        };
+            let syncer = ParallelSyncer::new(config);
+            println!("     Diagnostic mode: using {} strategy", sync_options.forced_strategy.as_ref().unwrap());
+            let _stats = syncer.synchronize_smart(source, destination, sync_options)?;
+        } else {
+            // Default: mixed mode (optimal for all scenarios)
+            // Force mixed mode in sync options and use smart mode infrastructure
+            let mut mixed_options = sync_options.clone();
+            mixed_options.forced_strategy = Some("mixed".to_string());
+            
+            let config = ParallelSyncConfig {
+                worker_threads: threads,
+                io_threads: threads,
+                block_size,
+                max_parallel_files: threads * 2,
+            };
 
-        let syncer = ParallelSyncer::new(config);
-        let _stats = syncer.synchronize_with_options(source, destination, sync_options)?;
+            let syncer = ParallelSyncer::new(config);
+            let _stats = syncer.synchronize_smart(source, destination, mixed_options)?;
+        }
     } else {
         // Dry run mode
         sync::synchronize_with_options(source, destination, threads, sync_options)?;

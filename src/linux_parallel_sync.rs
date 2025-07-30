@@ -1,16 +1,15 @@
 //! Linux-optimized parallel sync for small files
 
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use anyhow::Result;
+use std::path::PathBuf;
 use rayon::prelude::*;
 
-use crate::file_list::{FileInfo, FileOperation};
+use crate::file_list::FileOperation;
 use crate::options::SyncOptions;
 use crate::sync_stats::SyncStats;
 
 #[cfg(target_os = "linux")]
-use crate::linux_fast_copy::{batch_copy_files, BatchCopyStats};
+use crate::linux_fast_copy::batch_copy_files;
 
 /// Linux-optimized synchronizer for thousands of small files
 pub struct LinuxParallelSyncer {

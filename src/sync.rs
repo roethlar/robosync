@@ -4,7 +4,6 @@ use crate::algorithm::{DeltaAlgorithm, Match};
 use crate::file_list::{compare_file_lists_with_roots, generate_file_list_with_options, FileOperation};
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
-use crate::sync_stats::SyncStats;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};

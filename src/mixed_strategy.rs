@@ -11,14 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use rayon::prelude::*;
 
-use crate::file_list::{FileInfo, FileOperation};
-use crate::fast_file_list::{FastFileListGenerator, FastEnumConfig};
+use crate::file_list::FileOperation;
 use crate::options::SyncOptions;
-use crate::parallel_sync::ParallelSyncer;
 use crate::platform_api::PlatformCopier;
 use crate::sync_stats::SyncStats;
 use crate::progress::SyncProgress;
-use crate::checksum::ChecksumType;
 use crate::formatted_display::{self, WorkerStats};
 
 /// Size thresholds for categorizing files - optimized for performance
@@ -98,23 +95,10 @@ impl MixedStrategyExecutor {
         }
         
         // Calculate file and size statistics
-        let (file_stats, size_stats) = self.calculate_stats(&categorized, source_root);
+        let (_file_stats, _size_stats) = self.calculate_stats(&categorized, source_root);
         
-        // Print strategy selection
-        println!("  Automatically selected strategy: Mixed mode");
-        println!("  ───────────────────────────────────────────────────────────────────────────────");
-        
-        // Print file analysis
-        formatted_display::print_file_analysis(
-            file_stats.total,
-            file_stats.small,
-            file_stats.medium,
-            file_stats.large,
-            size_stats.total,
-            size_stats.small,
-            size_stats.medium,
-            size_stats.large,
-        );
+        // Strategy already printed by parent
+        // File analysis already printed by parent
         
         // Print pending operations  
         let pending_stats = self.calculate_pending_stats(&categorized, source_root);
@@ -157,7 +141,7 @@ impl MixedStrategyExecutor {
             let pb_clone = pb.clone();
             let worker_start = std::time::Instant::now();
             
-            worker_info.insert("small", ("Small (<256KB)".to_string(), categorized.small_files.len() as u64, worker_start));
+            worker_info.insert("small", ("Small".to_string(), categorized.small_files.len() as u64, worker_start));
             
             let handle = thread::spawn(move || {
                 let stats = executor.process_small_files_batch(
@@ -183,7 +167,7 @@ impl MixedStrategyExecutor {
             let pb_clone = pb.clone();
             let worker_start = std::time::Instant::now();
             
-            worker_info.insert("medium", ("Medium (256KB-10MB)".to_string(), categorized.medium_files.len() as u64, worker_start));
+            worker_info.insert("medium", ("Medium".to_string(), categorized.medium_files.len() as u64, worker_start));
             
             let handle = thread::spawn(move || {
                 let stats = executor.process_medium_files(
@@ -209,7 +193,7 @@ impl MixedStrategyExecutor {
             let pb_clone = pb.clone();
             let worker_start = std::time::Instant::now();
             
-            worker_info.insert("large", ("Large (>10MB)".to_string(), categorized.large_files.len() as u64, worker_start));
+            worker_info.insert("large", ("Large".to_string(), categorized.large_files.len() as u64, worker_start));
             
             let handle = thread::spawn(move || {
                 let stats = executor.process_large_files(
@@ -256,7 +240,7 @@ impl MixedStrategyExecutor {
         for (worker_type, result, duration) in rx {
             match result {
                 Ok(stats) => {
-                    if let Some((name, count, _)) = worker_info.get(worker_type) {
+                    if let Some((name, _count, _)) = worker_info.get(worker_type) {
                         let bytes = stats.bytes_transferred();
                         let throughput = if duration.as_secs() > 0 {
                             bytes / duration.as_secs()
@@ -289,7 +273,6 @@ impl MixedStrategyExecutor {
         // Finish progress bar
         pb.finish_and_clear();
         
-        println!("\n  ───────────────────────────────────────────────────────────────────────────────");
         
         // Print worker performance
         formatted_display::print_worker_performance(worker_stats);
@@ -303,7 +286,7 @@ impl MixedStrategyExecutor {
         };
         
         if total_stats.files_deleted() > 0 {
-            println!("\n  ✅ Completed in {:.1}s: {} files copied, {} files deleted, {} transferred ({}/s)",
+            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(total_stats.files_copied()),
                 format_number(total_stats.files_deleted()),
@@ -311,12 +294,30 @@ impl MixedStrategyExecutor {
                 humanize_bytes(throughput)
             );
         } else {
-            println!("\n  ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(total_stats.files_copied()),
                 humanize_bytes(total_stats.bytes_transferred()),
                 humanize_bytes(throughput)
             );
+        }
+        
+        // Get metadata warning count
+        let warning_count = crate::metadata::get_and_reset_metadata_warning_count();
+        
+        // Print error/warning summary if there were any
+        if total_stats.errors() > 0 || warning_count > 0 {
+            eprintln!();
+            if total_stats.errors() > 0 {
+                eprintln!("     ⚠️  {} errors occurred during synchronization", total_stats.errors());
+            }
+            if warning_count > 0 {
+                eprintln!("     ⚠️  {} metadata warnings (permissions/ownership/timestamps)", warning_count);
+                eprintln!("        These are non-fatal - files were copied successfully.");
+                if warning_count > 10 {
+                    eprintln!("        Consider using --copy DAT to skip metadata preservation.");
+                }
+            }
         }
         
         Ok(total_stats)
@@ -431,8 +432,8 @@ impl MixedStrategyExecutor {
                                     self.progress.add_file();
                                     self.progress.add_bytes(bytes);
                                 }
-                                Err(e) => {
-                                    eprintln!("Error copying {:?}: {}", path, e);
+                                Err(_e) => {
+                                    // Error will be logged by copy_file_with_metadata
                                     chunk_stats.increment_errors();
                                 }
                             }
@@ -462,7 +463,8 @@ impl MixedStrategyExecutor {
                                     }
                                     self.progress.add_file();
                                 }
-                                Err(_e) => {
+                                Err(e) => {
+                                    eprintln!("Error creating symlink {}: {}", path.display(), e);
                                     chunk_stats.increment_errors();
                                 }
                             }
@@ -470,6 +472,7 @@ impl MixedStrategyExecutor {
                             #[cfg(windows)]
                             {
                                 // Windows symlink creation not implemented
+                                eprintln!("Error: Symlink creation not implemented on Windows for {}", path.display());
                                 chunk_stats.increment_errors();
                             }
                         }
@@ -608,7 +611,6 @@ impl MixedStrategyExecutor {
     
     /// Perform delta copy for a single file
     fn delta_copy_file(&self, source: &Path, dest: &Path, options: &SyncOptions) -> Result<u64> {
-        use crate::algorithm::DeltaAlgorithm;
         use crate::metadata::{copy_file_with_metadata, CopyFlags};
         
         // Create parent directory if needed
@@ -641,7 +643,7 @@ impl MixedStrategyExecutor {
     fn process_deletes(
         &self,
         deletes: &[FileOperation],
-        _options: &SyncOptions,
+        options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
     ) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
@@ -661,7 +663,8 @@ impl MixedStrategyExecutor {
                                         }
                                         self.progress.add_file();
                                     }
-                                    Err(_e) => {
+                                    Err(e) => {
+                                        eprintln!("Error deleting directory {}: {}", path.display(), e);
                                         stats.increment_errors();
                                     }
                                 }
@@ -674,13 +677,15 @@ impl MixedStrategyExecutor {
                                         }
                                         self.progress.add_file();
                                     }
-                                    Err(_e) => {
+                                    Err(e) => {
+                                        eprintln!("Error deleting file {}: {}", path.display(), e);
                                         stats.increment_errors();
                                     }
                                 }
                             }
                         }
-                        Err(_e) => {
+                        Err(e) => {
+                            eprintln!("Error accessing file for deletion {}: {}", path.display(), e);
                             stats.increment_errors();
                         }
                     }
@@ -739,7 +744,7 @@ struct PendingStats {
 
 impl MixedStrategyExecutor {
     /// Calculate file and size statistics
-    fn calculate_stats(&self, categorized: &CategorizedOps, source_root: &Path) -> (FileStats, SizeStats) {
+    fn calculate_stats(&self, categorized: &CategorizedOps, _source_root: &Path) -> (FileStats, SizeStats) {
         let mut file_stats = FileStats {
             total: 0,
             small: 0,
@@ -803,7 +808,7 @@ impl MixedStrategyExecutor {
     }
     
     /// Calculate pending operation statistics
-    fn calculate_pending_stats(&self, categorized: &CategorizedOps, source_root: &Path) -> PendingStats {
+    fn calculate_pending_stats(&self, categorized: &CategorizedOps, _source_root: &Path) -> PendingStats {
         let mut stats = PendingStats {
             files_create: 0,
             files_update: 0,
