@@ -9,7 +9,7 @@
 
 use crate::file_list::{FileInfo, FileOperation};
 use crate::options::SyncOptions;
-use crate::simple_progress::SimpleProgress;
+use crate::progress::SyncProgress;
 use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -46,7 +46,7 @@ impl Default for FastEnumConfig {
 /// Fast file list generator with progress tracking
 pub struct FastFileListGenerator {
     config: FastEnumConfig,
-    progress: Option<Arc<SimpleProgress>>,
+    progress: Option<Arc<SyncProgress>>,
 }
 
 impl FastFileListGenerator {
@@ -57,7 +57,7 @@ impl FastFileListGenerator {
         }
     }
 
-    pub fn with_progress(mut self, progress: Arc<SimpleProgress>) -> Self {
+    pub fn with_progress(mut self, progress: Arc<SyncProgress>) -> Self {
         self.progress = Some(progress);
         self
     }
@@ -383,7 +383,7 @@ pub fn compare_file_lists_fast(
     source_root: &Path,
     dest_root: &Path,
     options: &SyncOptions,
-    progress: Option<Arc<SimpleProgress>>,
+    progress: Option<Arc<SyncProgress>>,
 ) -> Vec<FileOperation> {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

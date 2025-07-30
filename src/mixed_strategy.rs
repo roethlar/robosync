@@ -17,7 +17,7 @@ use crate::options::SyncOptions;
 use crate::parallel_sync::ParallelSyncer;
 use crate::platform_api::PlatformCopier;
 use crate::sync_stats::SyncStats;
-use crate::simple_progress::SimpleProgress;
+use crate::progress::SyncProgress;
 use crate::checksum::ChecksumType;
 
 /// Size thresholds for categorizing files - optimized for performance
@@ -32,13 +32,13 @@ const SMALL_FILE_THREADS: usize = 32;
 
 /// Mixed strategy executor
 pub struct MixedStrategyExecutor {
-    progress: Arc<SimpleProgress>,
+    progress: Arc<SyncProgress>,
 }
 
 impl MixedStrategyExecutor {
     pub fn new(total_files: u64, total_bytes: u64) -> Self {
         Self { 
-            progress: SimpleProgress::new(total_files, total_bytes)
+            progress: Arc::new(SyncProgress::new_silent(total_files, total_bytes))
         }
     }
     

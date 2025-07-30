@@ -29,7 +29,6 @@ use crate::retry::{with_retry, RetryConfig};
 use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
-use crate::unified_progress::UnifiedProgressManager;
 use crate::mixed_strategy::MixedStrategyExecutor;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -182,7 +181,7 @@ impl ParallelSyncer {
         let progress_manager = if options.no_progress || use_mixed_mode {
             None
         } else {
-            Some(Arc::new(UnifiedProgressManager::new(
+            Some(Arc::new(SyncProgress::new(
                 file_stats.total_files as u64,
                 file_stats.total_size,
             )))
@@ -300,7 +299,7 @@ impl ParallelSyncer {
         
         // Finish progress tracking
         if let Some(pm) = progress_manager {
-            pm.finish(result.is_ok());
+            pm.finish();
         }
         
         // Pattern learning functionality moved to separate shimmer project

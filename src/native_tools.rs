@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::sync_stats::SyncStats;
-use crate::unified_progress::{ProgressParser, ToolType, UnifiedProgressManager};
+use crate::progress::{SyncProgress, ToolType};
 
 /// Wrapper for native rsync command
 pub struct RsyncWrapper {
     extra_args: Vec<String>,
-    progress_manager: Option<Arc<UnifiedProgressManager>>,
+    progress_manager: Option<Arc<SyncProgress>>,
 }
 
 impl RsyncWrapper {
@@ -27,7 +27,7 @@ impl RsyncWrapper {
         }
     }
     
-    pub fn with_progress(mut self, progress_manager: Arc<UnifiedProgressManager>) -> Self {
+    pub fn with_progress(mut self, progress_manager: Arc<SyncProgress>) -> Self {
         self.progress_manager = Some(progress_manager);
         self
     }
@@ -69,12 +69,12 @@ impl RsyncWrapper {
         // Spawn thread to parse progress output
         if let Some(stdout) = child.stdout.take() {
             if let Some(ref progress_manager) = self.progress_manager {
-                let parser = ProgressParser::new(Arc::clone(progress_manager), ToolType::Rsync);
+                let progress_manager = Arc::clone(progress_manager);
                 thread::spawn(move || {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines() {
                         if let Ok(line) = line {
-                            parser.parse_line(&line);
+                            progress_manager.update_from_tool_output(&line, ToolType::Rsync);
                         }
                     }
                 });
@@ -104,7 +104,7 @@ impl RsyncWrapper {
 #[cfg(target_os = "windows")]
 pub struct RobocopyWrapper {
     extra_args: Vec<String>,
-    progress_manager: Option<Arc<UnifiedProgressManager>>,
+    progress_manager: Option<Arc<SyncProgress>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -116,7 +116,7 @@ impl RobocopyWrapper {
         }
     }
     
-    pub fn with_progress(mut self, progress_manager: Arc<UnifiedProgressManager>) -> Self {
+    pub fn with_progress(mut self, progress_manager: Arc<SyncProgress>) -> Self {
         self.progress_manager = Some(progress_manager);
         self
     }
@@ -151,12 +151,12 @@ impl RobocopyWrapper {
         // Spawn thread to parse output
         if let Some(stdout) = child.stdout.take() {
             if let Some(ref progress_manager) = self.progress_manager {
-                let parser = ProgressParser::new(Arc::clone(progress_manager), ToolType::Robocopy);
+                let progress_manager = Arc::clone(progress_manager);
                 thread::spawn(move || {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines() {
                         if let Ok(line) = line {
-                            parser.parse_line(&line);
+                            progress_manager.update_from_tool_output(&line, ToolType::Robocopy);
                             // Also update stats
                             Self::parse_file_line(&line, &stats_clone);
                         }
@@ -241,7 +241,7 @@ impl NativeToolExecutor {
         source: &Path,
         destination: &Path,
         args: Vec<String>,
-        progress_manager: Option<Arc<UnifiedProgressManager>>,
+        progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         if self.dry_run {
             println!("Would execute: rsync {} {} {}", 
@@ -280,7 +280,7 @@ impl NativeToolExecutor {
         source: &Path,
         destination: &Path,
         args: Vec<String>,
-        progress_manager: Option<Arc<UnifiedProgressManager>>,
+        progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         if self.dry_run {
             println!("Would execute: robocopy {} {} {}", 
@@ -337,7 +337,7 @@ impl NativeToolExecutor {
         &self,
         source: &Path,
         destination: &Path,
-        progress_manager: Option<Arc<UnifiedProgressManager>>,
+        progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         use crate::options::SyncOptions;
         use crate::parallel_sync::{ParallelSyncer, ParallelSyncConfig};
