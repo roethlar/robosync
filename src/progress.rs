@@ -331,6 +331,11 @@ impl SyncProgress {
         }
     }
 
+    /// Get total bytes transferred so far
+    pub fn get_bytes_transferred(&self) -> u64 {
+        self.transferred_bytes.load(Ordering::Relaxed)
+    }
+
     /// Force a progress update (for compatibility with SimpleProgress)
     pub fn print_update(&self) {
         if self.silent_mode.load(Ordering::Relaxed) {

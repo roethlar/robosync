@@ -32,6 +32,7 @@ RoboSync combines the battle-tested reliability of RoboCopy and rsync with moder
 - **Retry Logic** - Configurable retries with exponential backoff
 - **Metadata Preservation** - Timestamps, permissions, ownership, all preserved
 - **Symlink Support** - Handle links your way: copy, follow, or skip
+- **Network Support** - Works with mounted network drives (SMB/NFS/SSHFS)
 
 ### 🎮 Developer-Friendly Interface
 - **RoboCopy Compatible** - Your muscle memory still works
@@ -62,8 +63,8 @@ robosync /source /destination -e
 # Mirror with confirmation
 robosync /source /dest --mir --confirm
 
-# Network sync with compression
-robosync /local/path user@server:/remote/path -e -z
+# Sync to network mount with compression
+robosync /local/path /mnt/network/path -e -z
 
 # See what would happen
 robosync /source /dest -e -n
@@ -81,7 +82,7 @@ robosync ~/ /backup/home/ -e \
 
 ### 🔄 Keep Servers in Sync
 ```bash
-robosync /var/www/ server:/var/www/ --mir \
+robosync /var/www/ /mnt/server/var/www/ --mir \
   --compress \
   --retry 3 --wait 5 \
   --mt 16
@@ -199,6 +200,11 @@ robosync /source /dest -e -vv
 # Disable error reports
 robosync /source /dest -e --no-report-errors
 ```
+
+## 📝 Important Notes
+
+### Network Transfers
+RoboSync operates on local and mounted filesystems including network mounts like NFS, SMB/CIFS, and SSHFS. Mount your network drives first, then use RoboSync for blazing fast synchronized transfers.
 
 ## 🏗️ Architecture
 

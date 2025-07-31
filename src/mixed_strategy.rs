@@ -88,10 +88,23 @@ impl MixedStrategyExecutor {
         use std::collections::HashMap;
         use std::sync::mpsc;
         use std::thread;
+        use indicatif::{ProgressBar, ProgressStyle};
+
+        // Show spinner during categorization for user feedback
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner} {msg}")
+                .expect("Failed to set spinner template")
+        );
+        spinner.set_message("Analyzing files for optimal strategy...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
         // Categorize files by size and type
         let categorized = self.categorize_operations(operations);
         let operation_count = categorized.total_operations();
+        
+        spinner.finish_and_clear();
 
         if operation_count == 0 {
             println!("\n  ℹ️  No operations to perform - all files are up to date!");
@@ -157,6 +170,7 @@ impl MixedStrategyExecutor {
                 ),
             );
 
+            let st = start_time;
             let handle = thread::spawn(move || {
                 let stats = executor.process_small_files_batch(
                     &small_files,
@@ -164,6 +178,7 @@ impl MixedStrategyExecutor {
                     &dest_root,
                     &options,
                     Some(&pb_clone),
+                    st,
                 );
                 let _ = tx.send(("small", stats, worker_start.elapsed()));
             });
@@ -190,6 +205,7 @@ impl MixedStrategyExecutor {
                 ),
             );
 
+            let st = start_time;
             let handle = thread::spawn(move || {
                 let stats = executor.process_medium_files(
                     &medium_files,
@@ -197,6 +213,7 @@ impl MixedStrategyExecutor {
                     &dest_root,
                     &options,
                     Some(&pb_clone),
+                    st,
                 );
                 let _ = tx.send(("medium", stats, worker_start.elapsed()));
             });
@@ -223,6 +240,7 @@ impl MixedStrategyExecutor {
                 ),
             );
 
+            let st = start_time;
             let handle = thread::spawn(move || {
                 let stats = executor.process_large_files(
                     &large_files,
@@ -230,6 +248,7 @@ impl MixedStrategyExecutor {
                     &dest_root,
                     &options,
                     Some(&pb_clone),
+                    st,
                 );
                 let _ = tx.send(("large", stats, worker_start.elapsed()));
             });
@@ -256,6 +275,7 @@ impl MixedStrategyExecutor {
                 ),
             );
 
+            let st = start_time;
             let handle = thread::spawn(move || {
                 let stats = executor.process_delta_files(
                     &delta_files,
@@ -263,6 +283,7 @@ impl MixedStrategyExecutor {
                     &dest_root,
                     &options,
                     Some(&pb_clone),
+                    st,
                 );
                 let _ = tx.send(("delta", stats, worker_start.elapsed()));
             });
@@ -287,8 +308,9 @@ impl MixedStrategyExecutor {
                 ),
             );
 
+            let st = start_time;
             let handle = thread::spawn(move || {
-                let stats = executor.process_deletes(&deletes, &options, Some(&pb_clone));
+                let stats = executor.process_deletes(&deletes, &options, Some(&pb_clone), st);
                 let _ = tx.send(("delete", stats, worker_start.elapsed()));
             });
             handles.push(handle);
@@ -463,6 +485,7 @@ impl MixedStrategyExecutor {
         dest_root: &Path,
         options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
+        start_time: std::time::Instant,
     ) -> Result<SyncStats> {
         use crate::metadata::{CopyFlags, copy_file_with_metadata};
 
@@ -505,14 +528,18 @@ impl MixedStrategyExecutor {
                                     chunk_stats.increment_files_copied();
 
                                     // Update progress
-                                    if let Some(pb) = progress_bar {
-                                        pb.inc(1);
-                                        pb.set_message(format!("{} transferred",
-                                            humanize_bytes(chunk_stats.bytes_transferred())
-                                        ));
-                                    }
                                     self.progress.add_file();
                                     self.progress.add_bytes(bytes);
+                                    
+                                    if let Some(pb) = progress_bar {
+                                        pb.inc(1);
+                                        let elapsed = start_time.elapsed().as_secs_f64();
+                                        if elapsed > 0.0 {
+                                            let total_bytes = self.progress.get_bytes_transferred();
+                                            let throughput = (total_bytes as f64 / elapsed) as u64;
+                                            pb.set_message(format!("{}/s", humanize_bytes(throughput)));
+                                        }
+                                    }
                                 }
                                 Err(_e) => {
                                     // Error will be logged by copy_file_with_metadata
@@ -588,6 +615,7 @@ impl MixedStrategyExecutor {
         dest_root: &Path,
         _options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
+        start_time: std::time::Instant,
     ) -> Result<SyncStats> {
         let copier = PlatformCopier::new();
 
@@ -608,16 +636,19 @@ impl MixedStrategyExecutor {
         let stats = copier.copy_files(&file_pairs)?;
 
         // Update progress
-        if let Some(pb) = progress_bar {
-            pb.inc(stats.files_copied());
-            pb.set_message(format!(
-                "{} transferred",
-                humanize_bytes(stats.bytes_transferred())
-            ));
-        }
         self.progress.add_bytes(stats.bytes_transferred());
         for _ in 0..stats.files_copied() {
             self.progress.add_file();
+        }
+        
+        if let Some(pb) = progress_bar {
+            pb.inc(stats.files_copied());
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                let total_bytes = self.progress.get_bytes_transferred();
+                let throughput = (total_bytes as f64 / elapsed) as u64;
+                pb.set_message(format!("{}/s", humanize_bytes(throughput)));
+            }
         }
 
         Ok(stats)
@@ -631,6 +662,7 @@ impl MixedStrategyExecutor {
         dest_root: &Path,
         options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
+        start_time: std::time::Instant,
     ) -> Result<SyncStats> {
         let stats = SyncStats::default();
 
@@ -646,15 +678,18 @@ impl MixedStrategyExecutor {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
 
-                            if let Some(pb) = progress_bar {
-                                pb.inc(1);
-                                pb.set_message(format!(
-                                    "{} transferred",
-                                    humanize_bytes(stats.bytes_transferred())
-                                ));
-                            }
                             self.progress.add_file();
                             self.progress.add_bytes(bytes);
+                            
+                            if let Some(pb) = progress_bar {
+                                pb.inc(1);
+                                let elapsed = start_time.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let total_bytes = self.progress.get_bytes_transferred();
+                                    let throughput = (total_bytes as f64 / elapsed) as u64;
+                                    pb.set_message(format!("{}/s", humanize_bytes(throughput)));
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Delta transfer failed for {path:?}: {e}");
@@ -673,15 +708,18 @@ impl MixedStrategyExecutor {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
 
-                            if let Some(pb) = progress_bar {
-                                pb.inc(1);
-                                pb.set_message(format!(
-                                    "{} transferred",
-                                    humanize_bytes(stats.bytes_transferred())
-                                ));
-                            }
                             self.progress.add_file();
                             self.progress.add_bytes(bytes);
+                            
+                            if let Some(pb) = progress_bar {
+                                pb.inc(1);
+                                let elapsed = start_time.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let total_bytes = self.progress.get_bytes_transferred();
+                                    let throughput = (total_bytes as f64 / elapsed) as u64;
+                                    pb.set_message(format!("{}/s", humanize_bytes(throughput)));
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Copy failed for {path:?}: {e}");
@@ -704,6 +742,7 @@ impl MixedStrategyExecutor {
         dest_root: &Path,
         options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
+        start_time: std::time::Instant,
     ) -> Result<SyncStats> {
         let stats = SyncStats::default();
 
@@ -720,15 +759,18 @@ impl MixedStrategyExecutor {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
                             
-                            if let Some(pb) = progress_bar {
-                                pb.inc(1);
-                                pb.set_message(format!(
-                                    "{} transferred",
-                                    humanize_bytes(stats.bytes_transferred())
-                                ));
-                            }
                             self.progress.add_file();
                             self.progress.add_bytes(bytes);
+                            
+                            if let Some(pb) = progress_bar {
+                                pb.inc(1);
+                                let elapsed = start_time.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let total_bytes = self.progress.get_bytes_transferred();
+                                    let throughput = (total_bytes as f64 / elapsed) as u64;
+                                    pb.set_message(format!("{}/s", humanize_bytes(throughput)));
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Copy failed for {path:?}: {e}");
@@ -914,6 +956,7 @@ impl MixedStrategyExecutor {
         deletes: &[FileOperation],
         options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
+        _start_time: std::time::Instant,
     ) -> Result<SyncStats> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};

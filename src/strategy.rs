@@ -358,7 +358,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _strategy = selector.choose_strategy(
+        let strategy = selector.choose_strategy(
             &stats,
             Path::new("/tmp/src"),
             Path::new("/tmp/dst"),
