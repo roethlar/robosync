@@ -401,9 +401,9 @@ impl ParallelSyncer {
                 }
             }
 
-            CopyStrategy::NativeRobocopy { extra_args } => {
+            CopyStrategy::NativeRobocopy { extra_args: _ } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
-                let executor = NativeToolExecutor::new(options.dry_run);
+                let _executor = NativeToolExecutor::new(options.dry_run);
 
                 #[cfg(target_os = "windows")]
                 {
