@@ -40,3 +40,10 @@ clippy.log
 
 # Error reports
 robosync_errors_*.txt
+
+# Package manager templates (need SHA256 updates)
+homebrew-formula.rb
+PKGBUILD
+robosync.json
+robosync.nix
+snap/
