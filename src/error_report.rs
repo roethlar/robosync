@@ -116,7 +116,10 @@ impl ErrorReporter {
         *self
             .error_count
             .lock()
-            .unwrap_or_else(|_| panic!("Lock poisoned"))
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: Error report lock poisoned: {}", e);
+                std::process::exit(1);
+            })
     }
 
     /// Get warning count
@@ -124,7 +127,10 @@ impl ErrorReporter {
         *self
             .warning_count
             .lock()
-            .unwrap_or_else(|_| panic!("Lock poisoned"))
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: Error report lock poisoned: {}", e);
+                std::process::exit(1);
+            })
     }
 
     /// Write the error report to file if there were any errors or warnings

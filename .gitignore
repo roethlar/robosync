@@ -12,6 +12,7 @@ test_results.md
 test_all_options.sh
 test_*
 debug_*
+deletion_test/
 
 # Session/context files
 *session*.txt

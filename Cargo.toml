@@ -1,16 +1,26 @@
 [package]
 name = "robosync"
-version = "0.8.30"
-edition = "2024"
+version = "1.0.0"
+edition = "2021"
 authors = ["RoboSync Contributors"]
 description = "High-performance file synchronization with intelligent concurrent processing"
 license = "MIT"
 repository = "https://github.com/roethlar/robosync"
 readme = "README.md"
-keywords = ["sync", "robocopy", "rsync", "backup", "file-transfer", "concurrent"]
+keywords = ["sync", "robocopy", "rsync", "backup", "file-transfer"]
 categories = ["command-line-utilities", "filesystem"]
 documentation = "https://docs.rs/robosync"
-homepage = "https://github.com/yourusername/robosync"
+homepage = "https://github.com/roethlar/robosync"
+exclude = [
+    ".github/",
+    "test-*/",
+    "*.md",
+    "!README.md",
+    "CLAUDE.md",
+    ".grok/",
+    "coordination.json",
+    "conversation_backup.md"
+]
 
 [dependencies]
 # Core dependencies

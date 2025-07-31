@@ -115,6 +115,22 @@ impl SyncProgress {
         }
     }
 
+    /// Create a no-op progress tracker (for --no-progress mode)
+    pub fn new_noop() -> Self {
+        Self {
+            total_files: 0,
+            completed_files: AtomicU64::new(0),
+            _total_bytes: 0,
+            transferred_bytes: AtomicU64::new(0),
+            start_time: Instant::now(),
+            progress_bar: None,
+            silent_mode: AtomicBool::new(true), // Set to true so it goes through silent path
+            update_interval: Duration::from_secs(u64::MAX), // Never update
+            last_update: Mutex::new(Instant::now()),
+            current_file: Mutex::new(String::new()),
+        }
+    }
+
     pub fn update_file_complete(&mut self, file_size: u64) {
         let completed = self.completed_files.fetch_add(1, Ordering::Relaxed) + 1;
         self.transferred_bytes
@@ -153,6 +169,11 @@ impl SyncProgress {
     }
 
     pub fn finish(&self) {
+        // Skip all output if in no-op mode
+        if self.update_interval.as_secs() == u64::MAX {
+            return;
+        }
+        
         if self.silent_mode.load(Ordering::Relaxed) {
             // Final text summary for silent mode
             let elapsed = self.start_time.elapsed();
@@ -262,6 +283,11 @@ impl SyncProgress {
 
     /// Print text update in silent mode (from SimpleProgress)
     fn maybe_print_text_update(&self) {
+        // Skip if update interval is set to MAX (no-op mode)
+        if self.update_interval.as_secs() == u64::MAX {
+            return;
+        }
+        
         let now = Instant::now();
         let should_update = {
             if let Ok(last) = self.last_update.lock() {
@@ -281,6 +307,11 @@ impl SyncProgress {
 
     /// Print current progress as text
     fn print_text_update(&self) {
+        // Skip if in no-op mode
+        if self.update_interval.as_secs() == u64::MAX {
+            return;
+        }
+        
         let elapsed = self.start_time.elapsed();
         let bytes = self.transferred_bytes.load(Ordering::Relaxed);
 
@@ -338,6 +369,11 @@ impl SyncProgress {
 
     /// Force a progress update (for compatibility with SimpleProgress)
     pub fn print_update(&self) {
+        // Skip if in no-op mode
+        if self.update_interval.as_secs() == u64::MAX {
+            return;
+        }
+        
         if self.silent_mode.load(Ordering::Relaxed) {
             self.print_text_update();
         }

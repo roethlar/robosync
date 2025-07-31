@@ -202,7 +202,11 @@ impl ParallelSyncer {
             })
             .sum();
 
-        let executor = MixedStrategyExecutor::new(total_files, total_bytes);
+        let executor = if options.no_progress {
+            MixedStrategyExecutor::new_with_no_progress()
+        } else {
+            MixedStrategyExecutor::new(total_files, total_bytes)
+        };
         executor.execute(operations, &source, &destination, &options)
     }
 
@@ -480,10 +484,14 @@ impl ParallelSyncer {
                 let operations = self.collect_operations(&source, &destination, &options)?;
 
                 // Execute mixed strategy with simple progress
-                let executor = MixedStrategyExecutor::new(
-                    file_stats.total_files as u64,
-                    file_stats.total_size,
-                );
+                let executor = if options.no_progress {
+                    MixedStrategyExecutor::new_with_no_progress()
+                } else {
+                    MixedStrategyExecutor::new(
+                        file_stats.total_files as u64,
+                        file_stats.total_size,
+                    )
+                };
                 executor.execute(operations, &source, &destination, &options)
             }
         };

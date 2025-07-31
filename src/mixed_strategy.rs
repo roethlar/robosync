@@ -77,6 +77,12 @@ impl MixedStrategyExecutor {
         }
     }
 
+    pub fn new_with_no_progress() -> Self {
+        Self {
+            progress: Arc::new(SyncProgress::new_noop()),
+        }
+    }
+
     /// Execute mixed strategy synchronization
     pub fn execute(
         &self,
@@ -118,31 +124,51 @@ impl MixedStrategyExecutor {
         // File analysis already printed by parent
 
         // Print pending operations
-        let pending_stats = self.calculate_pending_stats(&categorized, source_root);
-        formatted_display::print_pending_operations(
-            pending_stats.files_create,
-            pending_stats.files_update,
-            pending_stats.files_delete,
-            0, // files_skip - we don't skip in this implementation
-            pending_stats.dirs_create,
-            0, // dirs_update
-            0, // dirs_delete
-            0, // dirs_skip
-            pending_stats.size_create,
-            pending_stats.size_update,
-            pending_stats.size_delete,
-            0, // size_skip
-        );
+        if options.verbose >= 1 {
+            // Verbose mode: show detailed breakdown
+            let detailed_stats = self.calculate_detailed_pending_stats(&categorized, source_root);
+            formatted_display::print_pending_operations_detailed(
+                &detailed_stats,
+                options.verbose,
+            );
+        } else {
+            // Normal mode: show simple summary
+            let pending_stats = self.calculate_pending_stats(&categorized, source_root);
+            formatted_display::print_pending_operations(
+                pending_stats.files_create,
+                pending_stats.files_update,
+                pending_stats.files_delete,
+                0, // files_skip - we don't skip in this implementation
+                pending_stats.dirs_create,
+                0, // dirs_update
+                0, // dirs_delete
+                0, // dirs_skip
+                pending_stats.size_create,
+                pending_stats.size_update,
+                pending_stats.size_delete,
+                0, // size_skip
+            );
+        }
 
         // Process directories first (must be done before files)
         self.create_directories(&categorized.directories, source_root, dest_root)?;
 
         // Clear any previous progress output before starting main progress bar
-        println!(); // Add blank line for separation
+        if !options.no_progress {
+            println!(); // Add blank line for separation
+        }
 
-        // Create progress bar
-        let pb = formatted_display::create_progress_bar(operation_count);
-        pb.set_message("Starting...");
+        // Create progress bar (if enabled)
+        let pb = if options.no_progress {
+            // Create a dummy progress bar that doesn't output anything
+            let pb = indicatif::ProgressBar::hidden();
+            pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+            pb
+        } else {
+            let pb = formatted_display::create_progress_bar(operation_count);
+            pb.set_message("Starting...");
+            pb
+        };
 
         // Setup for parallel execution
         let (tx, rx) = mpsc::channel();
@@ -171,13 +197,14 @@ impl MixedStrategyExecutor {
             );
 
             let st = start_time;
+            let no_progress = options.no_progress;
             let handle = thread::spawn(move || {
                 let stats = executor.process_small_files_batch(
                     &small_files,
                     &source_root,
                     &dest_root,
                     &options,
-                    Some(&pb_clone),
+                    if no_progress { None } else { Some(&pb_clone) },
                     st,
                 );
                 let _ = tx.send(("small", stats, worker_start.elapsed()));
@@ -206,13 +233,14 @@ impl MixedStrategyExecutor {
             );
 
             let st = start_time;
+            let no_progress = options.no_progress;
             let handle = thread::spawn(move || {
                 let stats = executor.process_medium_files(
                     &medium_files,
                     &source_root,
                     &dest_root,
                     &options,
-                    Some(&pb_clone),
+                    if no_progress { None } else { Some(&pb_clone) },
                     st,
                 );
                 let _ = tx.send(("medium", stats, worker_start.elapsed()));
@@ -241,13 +269,14 @@ impl MixedStrategyExecutor {
             );
 
             let st = start_time;
+            let no_progress = options.no_progress;
             let handle = thread::spawn(move || {
                 let stats = executor.process_large_files(
                     &large_files,
                     &source_root,
                     &dest_root,
                     &options,
-                    Some(&pb_clone),
+                    if no_progress { None } else { Some(&pb_clone) },
                     st,
                 );
                 let _ = tx.send(("large", stats, worker_start.elapsed()));
@@ -276,13 +305,14 @@ impl MixedStrategyExecutor {
             );
 
             let st = start_time;
+            let no_progress = options.no_progress;
             let handle = thread::spawn(move || {
                 let stats = executor.process_delta_files(
                     &delta_files,
                     &source_root,
                     &dest_root,
                     &options,
-                    Some(&pb_clone),
+                    if no_progress { None } else { Some(&pb_clone) },
                     st,
                 );
                 let _ = tx.send(("delta", stats, worker_start.elapsed()));
@@ -309,8 +339,9 @@ impl MixedStrategyExecutor {
             );
 
             let st = start_time;
+            let no_progress = options.no_progress;
             let handle = thread::spawn(move || {
-                let stats = executor.process_deletes(&deletes, &options, Some(&pb_clone), st);
+                let stats = executor.process_deletes(&deletes, &options, if no_progress { None } else { Some(&pb_clone) }, st);
                 let _ = tx.send(("delete", stats, worker_start.elapsed()));
             });
             handles.push(handle);
@@ -360,11 +391,18 @@ impl MixedStrategyExecutor {
             let _ = handle.join();
         }
 
-        // Finish progress bar
-        pb.finish_and_clear();
+        // Finish progress bar (only if progress is enabled)
+        if !options.no_progress {
+            pb.finish_and_clear();
+        }
 
-        // Print worker performance
-        formatted_display::print_worker_performance(worker_stats);
+        // Print worker performance (unless --no-progress)
+        if !options.no_progress {
+            formatted_display::print_worker_performance(worker_stats);
+        }
+
+        // Finish the internal progress tracker to prevent any final output
+        self.progress.finish();
 
         // Final summary
         let elapsed = start_time.elapsed();
@@ -572,10 +610,9 @@ impl MixedStrategyExecutor {
                                     }
                                     self.progress.add_file();
                                 }
-                                Err(e) => {
-                                    if options.verbose > 0 {
-                                        eprintln!("Error creating symlink {}: {}", path.display(), e);
-                                    }
+                                Err(_e) => {
+                                    // Don't print to stderr with progress bar active
+                                    // Errors are tracked and will be reported at the end
                                     chunk_stats.increment_errors();
                                 }
                             }
@@ -584,9 +621,7 @@ impl MixedStrategyExecutor {
                             {
                                 let _ = target; // Unused on Windows
                                 // Windows symlink creation not implemented
-                                if options.verbose > 0 {
-                                    eprintln!("Error: Symlink creation not implemented on Windows for {}", path.display());
-                                }
+                                // Don't print to stderr with progress bar active
                                 chunk_stats.increment_errors();
                             }
                         }
@@ -954,7 +989,7 @@ impl MixedStrategyExecutor {
     fn process_deletes(
         &self,
         deletes: &[FileOperation],
-        options: &SyncOptions,
+        _options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
         _start_time: std::time::Instant,
     ) -> Result<SyncStats> {
@@ -980,14 +1015,9 @@ impl MixedStrategyExecutor {
                                     }
                                     self.progress.add_file();
                                 }
-                                Err(e) => {
-                                    if options.verbose > 0 {
-                                        eprintln!(
-                                            "Error deleting directory {}: {}",
-                                            path.display(),
-                                            e
-                                        );
-                                    }
+                                Err(_e) => {
+                                    // Don't print to stderr with progress bar active
+                                    // Errors are tracked and will be reported at the end
                                     errors.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1000,27 +1030,17 @@ impl MixedStrategyExecutor {
                                     }
                                     self.progress.add_file();
                                 }
-                                Err(e) => {
-                                    if options.verbose > 0 {
-                                        eprintln!(
-                                            "Error deleting file {}: {}",
-                                            path.display(),
-                                            e
-                                        );
-                                    }
+                                Err(_e) => {
+                                    // Don't print to stderr with progress bar active
+                                    // Errors are tracked and will be reported at the end
                                     errors.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        if options.verbose > 0 {
-                            eprintln!(
-                                "Error accessing file for deletion {}: {}",
-                                path.display(),
-                                e
-                            );
-                        }
+                    Err(_e) => {
+                        // Don't print to stderr with progress bar active
+                        // Errors are tracked and will be reported at the end
                         errors.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -1086,14 +1106,34 @@ struct SizeStats {
 }
 
 /// Pending operation statistics
-struct PendingStats {
-    files_create: u64,
-    files_update: u64,
-    files_delete: u64,
-    dirs_create: u64,
-    size_create: u64,
-    size_update: u64,
-    size_delete: u64,
+pub struct PendingStats {
+    pub files_create: u64,
+    pub files_update: u64,
+    pub files_delete: u64,
+    pub dirs_create: u64,
+    pub size_create: u64,
+    pub size_update: u64,
+    pub size_delete: u64,
+}
+
+/// Detailed breakdown by size category
+pub struct SizeBreakdown {
+    pub small_count: u64,
+    pub small_size: u64,
+    pub medium_count: u64,
+    pub medium_size: u64,
+    pub large_count: u64,
+    pub large_size: u64,
+    pub delta_count: u64,
+    pub delta_size: u64,
+    pub delta_actual: u64,  // Estimated actual transfer size for delta files
+}
+
+/// Detailed pending stats with size breakdowns
+pub struct DetailedPendingStats {
+    pub basic: PendingStats,
+    pub create_breakdown: SizeBreakdown,
+    pub update_breakdown: SizeBreakdown,
 }
 
 impl MixedStrategyExecutor {
@@ -1238,6 +1278,178 @@ impl MixedStrategyExecutor {
         // Count deletes
         stats.files_delete = categorized.deletes.len() as u64;
         // We don't track delete sizes in the current implementation
+
+        stats
+    }
+
+    /// Calculate detailed pending stats with size breakdowns
+    fn calculate_detailed_pending_stats(
+        &self,
+        categorized: &CategorizedOps,
+        _source_root: &Path,
+    ) -> DetailedPendingStats {
+        let mut stats = DetailedPendingStats {
+            basic: PendingStats {
+                files_create: 0,
+                files_update: 0,
+                files_delete: 0,
+                dirs_create: 0,
+                size_create: 0,
+                size_update: 0,
+                size_delete: 0,
+            },
+            create_breakdown: SizeBreakdown {
+                small_count: 0,
+                small_size: 0,
+                medium_count: 0,
+                medium_size: 0,
+                large_count: 0,
+                large_size: 0,
+                delta_count: 0,
+                delta_size: 0,
+                delta_actual: 0,
+            },
+            update_breakdown: SizeBreakdown {
+                small_count: 0,
+                small_size: 0,
+                medium_count: 0,
+                medium_size: 0,
+                large_count: 0,
+                large_size: 0,
+                delta_count: 0,
+                delta_size: 0,
+                delta_actual: 0,
+            },
+        };
+
+        // Process small files
+        for op in &categorized.small_files {
+            match op {
+                FileOperation::Create { path } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_create += 1;
+                            stats.basic.size_create += size;
+                            stats.create_breakdown.small_count += 1;
+                            stats.create_breakdown.small_size += size;
+                        }
+                    }
+                }
+                FileOperation::Update { path, .. } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_update += 1;
+                            stats.basic.size_update += size;
+                            stats.update_breakdown.small_count += 1;
+                            stats.update_breakdown.small_size += size;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Process medium files
+        for op in &categorized.medium_files {
+            match op {
+                FileOperation::Create { path } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_create += 1;
+                            stats.basic.size_create += size;
+                            stats.create_breakdown.medium_count += 1;
+                            stats.create_breakdown.medium_size += size;
+                        }
+                    }
+                }
+                FileOperation::Update { path, .. } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_update += 1;
+                            stats.basic.size_update += size;
+                            stats.update_breakdown.medium_count += 1;
+                            stats.update_breakdown.medium_size += size;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Process large files
+        for op in &categorized.large_files {
+            match op {
+                FileOperation::Create { path } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_create += 1;
+                            stats.basic.size_create += size;
+                            stats.create_breakdown.large_count += 1;
+                            stats.create_breakdown.large_size += size;
+                        }
+                    }
+                }
+                FileOperation::Update { path, .. } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_update += 1;
+                            stats.basic.size_update += size;
+                            stats.update_breakdown.large_count += 1;
+                            stats.update_breakdown.large_size += size;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Process delta files (with estimated actual transfer)
+        for op in &categorized.delta_files {
+            match op {
+                FileOperation::Create { path } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_create += 1;
+                            stats.basic.size_create += size;
+                            stats.create_breakdown.delta_count += 1;
+                            stats.create_breakdown.delta_size += size;
+                            stats.create_breakdown.delta_actual += size; // Full transfer for new files
+                        }
+                    }
+                }
+                FileOperation::Update { path, .. } => {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if !metadata.is_dir() {
+                            let size = metadata.len();
+                            stats.basic.files_update += 1;
+                            stats.basic.size_update += size;
+                            stats.update_breakdown.delta_count += 1;
+                            stats.update_breakdown.delta_size += size;
+                            // Estimate 10% change for delta files (conservative)
+                            stats.update_breakdown.delta_actual += size / 10;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Count directory creates
+        for op in &categorized.directories {
+            if let FileOperation::CreateDirectory { .. } = op {
+                stats.basic.dirs_create += 1;
+            }
+        }
+
+        // Count deletes
+        stats.basic.files_delete = categorized.deletes.len() as u64;
 
         stats
     }

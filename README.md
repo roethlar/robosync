@@ -46,7 +46,7 @@ RoboSync combines the battle-tested reliability of RoboCopy and rsync with moder
 
 ```bash
 # Build from source (recommended)
-git clone https://github.com/yourusername/robosync.git
+git clone https://github.com/roethlar/robosync.git
 cd robosync
 cargo build --release
 
@@ -132,6 +132,15 @@ robosync "C:\Users\Gamer\SavedGames" "D:\Backup\Saves" \
 | `--mt` | Thread count | CPU cores |
 | `-b` | Block size for delta | 1024 bytes |
 | `--strategy` | Force specific strategy | `mixed` |
+
+### File Size Categories (shown in -v mode)
+
+| Category | Size Range | Strategy | Color |
+|----------|-----------|----------|-------|
+| Small | < 256KB | Parallel batch processing | Green |
+| Medium | 256KB - 10MB | Platform-optimized APIs | Yellow |
+| Large | 10MB - 100MB | Standard copy | Red |
+| Delta | > 100MB | Delta transfer algorithm | Cyan |
 
 ### Safety & Control
 
@@ -272,7 +281,4 @@ Standing on the shoulders of giants:
 
 **Ready to sync at the speed of light?** 🚀
 
-```bash
-cargo install robosync
-robosync --help
-```
+See the [Installation](#installation) section above to get started!

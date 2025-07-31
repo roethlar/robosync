@@ -5,6 +5,9 @@ use crate::sync_stats::SyncStats;
 use crossterm::style::Color;
 use indicatif::{ProgressBar, ProgressStyle};
 
+// Import the detailed stats structs from mixed_strategy
+pub use crate::mixed_strategy::{DetailedPendingStats, SizeBreakdown};
+
 /// Display formatted header
 pub fn print_header(
     version: &str,
@@ -155,6 +158,129 @@ pub fn print_pending_operations(
     );
 }
 
+/// Display pending operations with detailed breakdown (verbose mode)
+pub fn print_pending_operations_detailed(
+    stats: &DetailedPendingStats,
+    _verbose_level: u8,
+) {
+    println!(
+        "\n     {}",
+        "Pending Operations:".color_bold_if(Color::Cyan)
+    );
+    println!();
+
+    // Files to create with breakdown
+    if stats.basic.files_create > 0 {
+        println!(
+            "     Files to create: {}",
+            format_number(stats.basic.files_create).color_if(Color::Green)
+        );
+        print_size_breakdown(&stats.create_breakdown, "       ");
+    }
+
+    // Files to update with breakdown
+    if stats.basic.files_update > 0 {
+        println!(
+            "     Files to update: {}",
+            format_number(stats.basic.files_update).color_if(Color::Yellow)
+        );
+        print_size_breakdown(&stats.update_breakdown, "       ");
+    }
+
+    // Files to delete (no breakdown needed)
+    if stats.basic.files_delete > 0 {
+        println!(
+            "     Files to delete: {}",
+            format_number(stats.basic.files_delete).color_if(Color::Red)
+        );
+    }
+
+    // Directories to create
+    if stats.basic.dirs_create > 0 {
+        println!(
+            "     Directories to create: {}",
+            format_number(stats.basic.dirs_create).color_if(Color::Green)
+        );
+    }
+
+    // Total summary
+    let total_operations = stats.basic.files_create + stats.basic.files_update + 
+                          stats.basic.files_delete + stats.basic.dirs_create;
+    
+    // Calculate actual transfer size considering delta optimization
+    let actual_transfer = stats.create_breakdown.small_size + stats.create_breakdown.medium_size +
+                         stats.create_breakdown.large_size + stats.create_breakdown.delta_actual +
+                         stats.update_breakdown.small_size + stats.update_breakdown.medium_size +
+                         stats.update_breakdown.large_size + stats.update_breakdown.delta_actual;
+    
+    let total_file_size = stats.basic.size_create + stats.basic.size_update;
+    
+    if total_file_size > actual_transfer {
+        let saved = total_file_size - actual_transfer;
+        println!(
+            "\n     Total: {} operations, {} file size ({} delta optimized to {})",
+            format_number(total_operations).color_bold_if(Color::White),
+            format_bytes_short(total_file_size).color_bold_if(Color::White),
+            format_bytes_short(saved).color_if(Color::Green),
+            format_bytes_short(actual_transfer).color_bold_if(Color::White)
+        );
+    } else {
+        println!(
+            "\n     Total: {} operations, {} transfer size",
+            format_number(total_operations).color_bold_if(Color::White),
+            format_bytes_short(actual_transfer).color_bold_if(Color::White)
+        );
+    }
+}
+
+/// Helper to print size breakdown
+fn print_size_breakdown(breakdown: &SizeBreakdown, indent: &str) {
+    if breakdown.small_count > 0 {
+        println!(
+            "{}Small:  {:>6} files, {:>8}",
+            indent,
+            format_number(breakdown.small_count).color_if(Color::Green),
+            format_bytes_short(breakdown.small_size)
+        );
+    }
+    if breakdown.medium_count > 0 {
+        println!(
+            "{}Medium: {:>6} files, {:>8}",
+            indent,
+            format_number(breakdown.medium_count).color_if(Color::Yellow),
+            format_bytes_short(breakdown.medium_size)
+        );
+    }
+    if breakdown.large_count > 0 {
+        println!(
+            "{}Large:  {:>6} files, {:>8}",
+            indent,
+            format_number(breakdown.large_count).color_if(Color::Red),
+            format_bytes_short(breakdown.large_size)
+        );
+    }
+    if breakdown.delta_count > 0 {
+        if breakdown.delta_actual < breakdown.delta_size {
+            let percent = (breakdown.delta_actual as f64 / breakdown.delta_size as f64 * 100.0) as u64;
+            println!(
+                "{}Delta:  {:>6} files, {:>8} (~{}% change, ~{} delta)",
+                indent,
+                format_number(breakdown.delta_count).color_if(Color::Cyan),
+                format_bytes_short(breakdown.delta_size),
+                percent,
+                format_bytes_short(breakdown.delta_actual).color_if(Color::Cyan)
+            );
+        } else {
+            println!(
+                "{}Delta:  {:>6} files, {:>8}",
+                indent,
+                format_number(breakdown.delta_count).color_if(Color::Cyan),
+                format_bytes_short(breakdown.delta_size)
+            );
+        }
+    }
+}
+
 /// Display sync summary
 pub fn print_sync_summary(
     stats: &SyncStats,
@@ -204,7 +330,7 @@ pub fn print_sync_summary(
 }
 
 /// Display worker performance
-pub fn print_worker_performance(workers: Vec<WorkerStats>) {
+pub fn print_worker_performance(mut workers: Vec<WorkerStats>) {
     if workers.is_empty() {
         return;
     }
@@ -215,6 +341,25 @@ pub fn print_worker_performance(workers: Vec<WorkerStats>) {
     );
     println!();
 
+    // Sort workers to match the order in pending operations: Small, Medium, Large, Delta
+    workers.sort_by(|a, b| {
+        let order_a = match a.name.as_str() {
+            "Small" => 0,
+            "Medium" => 1,
+            "Large" => 2,
+            "Delta transfer" => 3,
+            _ => 99,
+        };
+        let order_b = match b.name.as_str() {
+            "Small" => 0,
+            "Medium" => 1,
+            "Large" => 2,
+            "Delta transfer" => 3,
+            _ => 99,
+        };
+        order_a.cmp(&order_b)
+    });
+
     for worker in workers.iter() {
         // Skip the "Delete operations" worker if it exists
         if worker.name.contains("Delete") {
@@ -222,9 +367,10 @@ pub fn print_worker_performance(workers: Vec<WorkerStats>) {
         }
 
         let worker_color = match worker.name.as_str() {
-            "Large" => Color::Red,
-            "Medium" => Color::Yellow,
             "Small" => Color::Green,
+            "Medium" => Color::Yellow,
+            "Large" => Color::Red,
+            "Delta transfer" => Color::Cyan,
             _ => Color::White,
         };
 
@@ -255,7 +401,7 @@ pub fn create_progress_bar(total: u64) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("\n  [{bar:40}] {pos}/{len} | {msg}")
+            .template("  [{bar:40}] {pos}/{len} | {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("█▓░"),
     );
