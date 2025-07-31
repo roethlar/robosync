@@ -14,11 +14,15 @@ pub trait ConditionalColor: Display + Sized {
     fn color_if(self, color: Color) -> StyledString<Self> {
         StyledString {
             content: self,
-            color: if should_use_colors() { Some(color) } else { None },
+            color: if should_use_colors() {
+                Some(color)
+            } else {
+                None
+            },
             bold: false,
         }
     }
-    
+
     fn bold_if(self) -> StyledString<Self> {
         StyledString {
             content: self,
@@ -26,11 +30,15 @@ pub trait ConditionalColor: Display + Sized {
             bold: should_use_colors(),
         }
     }
-    
+
     fn color_bold_if(self, color: Color) -> StyledString<Self> {
         StyledString {
             content: self,
-            color: if should_use_colors() { Some(color) } else { None },
+            color: if should_use_colors() {
+                Some(color)
+            } else {
+                None
+            },
             bold: should_use_colors(),
         }
     }

@@ -5,6 +5,42 @@ All notable changes to RoboSync will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.29] - 2025-07-31
+
+### Added
+- Comprehensive error logging system with different verbosity levels
+- `--no-report-errors` flag to disable automatic error report generation
+- Error logger module for centralized error handling
+- Visual spinners for all sync stages
+- Delta transfer support for very large files (>100MB) with 64KB block size
+- Mixed mode as default strategy with concurrent processing
+
+### Changed
+- Updated README.md to reflect actual functionality (removed non-existent AI features)
+- Fixed format string warnings using clippy --fix
+- Improved compression with dynamic buffer sizing
+- Better error handling throughout the codebase
+
+### Fixed
+- All 27 dead code annotations removed
+- All 53 unwrap() calls replaced with proper error handling
+- Windows compilation errors
+- Duplicate progress bars in mixed mode
+- Missing scanning spinner feedback
+- --confirm flag now works properly in mixed mode
+- Progress bar speed display
+- Spinner alignment and checkmark display
+
+### Removed
+- Dead code files: multi_progress.rs, scrolling_progress.rs
+- Unused AvailableTools struct and related functionality
+- ~150 lines of dead code total
+
+### Code Quality
+- Reduced panic points from 53 to 0
+- Improved error handling throughout
+- Build now succeeds with minimal warnings
+
 ## [0.6.0] - 2025-07-25
 
 ### Added

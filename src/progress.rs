@@ -1,22 +1,22 @@
 //! Progress reporting and statistics
 
 use indicatif::{ProgressBar, ProgressStyle};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::io::{self, Write};
 
 /// Trait for progress tracking across different implementations
 pub trait ProgressTracker: Send + Sync {
     /// Update progress percentage (0-100)
     fn update_percentage(&self, percentage: u64);
-    
+
     /// Update file count
     fn update_file_count(&self, count: u64);
-    
+
     /// Update bytes transferred
     fn update_bytes(&self, bytes: u64);
-    
+
     /// Finish progress tracking
     fn finish(&self);
 }
@@ -25,8 +25,7 @@ pub trait ProgressTracker: Send + Sync {
 pub struct SyncProgress {
     total_files: u64,
     completed_files: AtomicU64,
-    #[allow(dead_code)]
-    total_bytes: u64,
+    _total_bytes: u64,
     transferred_bytes: AtomicU64,
     start_time: Instant,
     progress_bar: Option<ProgressBar>,
@@ -43,19 +42,22 @@ impl SyncProgress {
         progress_bar.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} files | {msg}")
-                .unwrap()
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("#>-"),
         );
+
+        // Enable spinner animation - updates every 100ms
+        progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
         Self {
             total_files,
             completed_files: AtomicU64::new(0),
-            total_bytes,
+            _total_bytes: total_bytes,
             transferred_bytes: AtomicU64::new(0),
             start_time: Instant::now(),
             progress_bar: Some(progress_bar),
             silent_mode: AtomicBool::new(false),
-            update_interval: Duration::from_secs(2),
+            update_interval: Duration::from_millis(500),
             last_update: Mutex::new(Instant::now()),
             current_file: Mutex::new(String::new()),
         }
@@ -66,7 +68,7 @@ impl SyncProgress {
         Self {
             total_files,
             completed_files: AtomicU64::new(0),
-            total_bytes,
+            _total_bytes: total_bytes,
             transferred_bytes: AtomicU64::new(0),
             start_time: Instant::now(),
             progress_bar: None,
@@ -102,7 +104,7 @@ impl SyncProgress {
         Self {
             total_files,
             completed_files: AtomicU64::new(0),
-            total_bytes,
+            _total_bytes: total_bytes,
             transferred_bytes: AtomicU64::new(0),
             start_time: Instant::now(),
             progress_bar,
@@ -136,7 +138,6 @@ impl SyncProgress {
         }
     }
 
-    #[allow(dead_code)]
     pub fn update_bytes_transferred(&mut self, bytes: u64) {
         self.transferred_bytes.fetch_add(bytes, Ordering::Relaxed);
 
@@ -156,13 +157,15 @@ impl SyncProgress {
             // Final text summary for silent mode
             let elapsed = self.start_time.elapsed();
             let bytes = self.transferred_bytes.load(Ordering::Relaxed);
-            let throughput = if elapsed.as_secs() > 0 {
-                bytes / elapsed.as_secs()
+            let elapsed_secs = elapsed.as_secs_f64();
+            let throughput = if elapsed_secs > 0.1 {
+                (bytes as f64 / elapsed_secs) as u64
             } else {
-                bytes
+                0
             };
-            
-            println!("\nCompleted: {} files, {} in {:.1}s ({}/s)",
+
+            println!(
+                "\nCompleted: {} files, {} in {:.1}s ({}/s)",
                 self.completed_files.load(Ordering::Relaxed),
                 format_bytes(bytes),
                 elapsed.as_secs_f32(),
@@ -183,7 +186,8 @@ impl SyncProgress {
                 println!("Synchronization statistics:");
                 println!(
                     "  Files processed: {}/{}",
-                    self.completed_files.load(Ordering::Relaxed), self.total_files
+                    self.completed_files.load(Ordering::Relaxed),
+                    self.total_files
                 );
                 println!("  Bytes transferred: {transferred_bytes} bytes");
                 println!("  Time elapsed: {:.2}s", elapsed.as_secs_f64());
@@ -197,11 +201,11 @@ impl SyncProgress {
         if let Ok(mut current) = self.current_file.lock() {
             *current = file.to_string();
         }
-        
+
         if self.silent_mode.load(Ordering::Relaxed) {
             // In silent mode, just track it
         } else if let Some(ref pb) = self.progress_bar {
-            pb.set_message(format!("Processing: {}", file));
+            pb.set_message(format!("Processing: {file}"));
         }
     }
 
@@ -222,9 +226,11 @@ impl SyncProgress {
                 if let Some(slash) = remaining.find('/') {
                     if let (Ok(left), Ok(total)) = (
                         remaining[..slash].parse::<u64>(),
-                        remaining[slash + 1..].split_whitespace().next()
+                        remaining[slash + 1..]
+                            .split_whitespace()
+                            .next()
                             .unwrap_or("0")
-                            .parse::<u64>()
+                            .parse::<u64>(),
                     ) {
                         let completed = total.saturating_sub(left);
                         if let Some(ref pb) = self.progress_bar {
@@ -234,7 +240,7 @@ impl SyncProgress {
                 }
             }
         }
-        
+
         // Track current file
         if !line.starts_with(' ') && line.contains('/') {
             self.set_current_file(line.trim());
@@ -264,7 +270,7 @@ impl SyncProgress {
                 false
             }
         };
-        
+
         if should_update {
             if let Ok(mut last) = self.last_update.lock() {
                 *last = now;
@@ -277,21 +283,27 @@ impl SyncProgress {
     fn print_text_update(&self) {
         let elapsed = self.start_time.elapsed();
         let bytes = self.transferred_bytes.load(Ordering::Relaxed);
-        
-        let throughput = if elapsed.as_secs() > 0 {
-            bytes / elapsed.as_secs()
+
+        let elapsed_secs = elapsed.as_secs_f64();
+        let throughput = if elapsed_secs > 0.1 {
+            (bytes as f64 / elapsed_secs) as u64
         } else {
             0
         };
-        
-        print!("\r{}/{} files | {} | {}/s | {:.1}s",
+
+        print!(
+            "\r{}/{} files | {} | {}/s | {:.1}s",
             self.completed_files.load(Ordering::Relaxed),
-            if self.total_files > 0 { self.total_files.to_string() } else { "?".to_string() },
+            if self.total_files > 0 {
+                self.total_files.to_string()
+            } else {
+                "?".to_string()
+            },
             format_bytes(bytes),
             format_bytes(throughput),
             elapsed.as_secs_f32()
         );
-        
+
         let _ = io::stdout().flush();
     }
 
@@ -311,7 +323,7 @@ impl SyncProgress {
         }
     }
 
-    /// Add completed file (for Arc usage) 
+    /// Add completed file (for Arc usage)
     pub fn add_file(&self) {
         self.completed_files.fetch_add(1, Ordering::Relaxed);
         if self.silent_mode.load(Ordering::Relaxed) {
@@ -370,12 +382,12 @@ fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
     let mut unit_idx = 0;
-    
+
     while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
         size /= 1024.0;
         unit_idx += 1;
     }
-    
+
     if unit_idx == 0 {
         format!("{} {}", size as u64, UNITS[unit_idx])
     } else {

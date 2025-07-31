@@ -61,7 +61,10 @@ where
                             description,
                             attempt + 1,
                             config.max_retries + 1,
-                            last_error.as_ref().unwrap(),
+                            last_error
+                                .as_ref()
+                                .map(|e| e.to_string())
+                                .unwrap_or_else(|| "Unknown error".to_string()),
                             config.wait_seconds
                         ));
                     }
@@ -73,16 +76,16 @@ where
     }
 
     // All retries exhausted
-    Err(last_error.unwrap()).with_context(|| {
-        format!(
-            "{} failed after {} retries",
-            description, config.max_retries
-        )
-    })
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No error information available")))
+        .with_context(|| {
+            format!(
+                "{} failed after {} retries",
+                description, config.max_retries
+            )
+        })
 }
 
 /// Check if an error is retryable
-#[allow(dead_code)]
 pub fn is_retryable_error(error: &anyhow::Error) -> bool {
     // Check the error chain for specific error types
     let error_string = error.to_string().to_lowercase();
@@ -130,7 +133,7 @@ mod tests {
     fn test_retry_success_first_attempt() {
         let config = RetryConfig::new(3, 1);
         let result = with_retry(|| Ok(42), &config, "test operation", None);
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result.expect("Operation should succeed"), 42);
     }
 
     #[test]
@@ -152,7 +155,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result.expect("Operation should succeed"), 42);
         assert_eq!(attempt_count.load(Ordering::SeqCst), 3);
     }
 
@@ -167,10 +170,12 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed after 2 retries"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed after 2 retries")
+        );
     }
 
     #[test]

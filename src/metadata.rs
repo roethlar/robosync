@@ -1,11 +1,11 @@
 //! File metadata handling for copy operations
 
+use crate::error_report::ErrorReportHandle;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use std::time::SystemTime;
-use crate::error_report::ErrorReportHandle;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 // Global counters for metadata warnings
 static METADATA_WARNING_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -47,7 +47,6 @@ impl CopyFlags {
     }
 
     /// Get all copy flags (DATSOU)
-    #[allow(dead_code)]
     pub fn all() -> Self {
         Self::from_string("DATSOU")
     }
@@ -72,68 +71,80 @@ pub fn copy_file_with_metadata_and_reporter(
     // Check if source is a symlink first
     let source_metadata = fs::symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
-    
+
     if source_metadata.is_symlink() {
         return copy_symlink_with_metadata(source, destination, flags);
     }
-    
+
     // First, let's copy the file data - this is the critical part
     let bytes_copied = if flags.data {
         streaming_copy_optimized(source, destination)?
     } else {
-        return Err(anyhow::anyhow!("Data flag (D) must be set for file copying"));
+        return Err(anyhow::anyhow!(
+            "Data flag (D) must be set for file copying"
+        ));
     };
-    
+
     // Now apply metadata - these are less critical and some may fail due to permissions
     let metadata = fs::metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
-    
+
     // Apply each type of metadata, but don't fail the whole operation for non-critical errors
     if flags.timestamps {
         if let Err(e) = copy_timestamps(source, destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
-                let msg = format!("Failed to preserve timestamps: {}", e);
-                error_reporter.unwrap().add_warning(destination, &msg);
+                let msg = format!("Failed to preserve timestamps: {e}");
+                if let Some(reporter) = error_reporter {
+                    reporter.add_warning(destination, &msg);
+                }
             }
         }
     }
-    
+
     if flags.security {
         if let Err(e) = copy_permissions(source, destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
-                let msg = format!("Failed to preserve permissions: {}", e);
-                error_reporter.unwrap().add_warning(destination, &msg);
+                let msg = format!("Failed to preserve permissions: {e}");
+                if let Some(reporter) = error_reporter {
+                    reporter.add_warning(destination, &msg);
+                }
             }
         }
     }
-    
+
     if flags.attributes {
         if let Err(e) = copy_attributes(source, destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
-                let msg = format!("Failed to preserve attributes: {}", e);
-                error_reporter.unwrap().add_warning(destination, &msg);
+                let msg = format!("Failed to preserve attributes: {e}");
+                if let Some(reporter) = error_reporter {
+                    reporter.add_warning(destination, &msg);
+                }
             }
         }
     }
-    
+
     #[cfg(unix)]
     if flags.owner {
         if let Err(e) = copy_ownership(source, destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
-                let msg = format!("Failed to preserve ownership: {} (requires appropriate privileges)", e);
-                error_reporter.unwrap().add_warning(destination, &msg);
+                let msg = format!(
+                    "Failed to preserve ownership: {e} (requires appropriate privileges)"
+                );
+                if let Some(reporter) = error_reporter {
+                    reporter.add_warning(destination, &msg);
+                }
             }
         }
     }
-    
+
     Ok(bytes_copied)
 }
 
@@ -445,7 +456,7 @@ pub fn detect_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilit
     {
         detect_unix_filesystem_capabilities(path)
     }
-    
+
     #[cfg(windows)]
     {
         detect_windows_filesystem_capabilities(path)
@@ -457,10 +468,10 @@ pub fn detect_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilit
 fn detect_unix_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilities> {
     // Try to get the mount point for this path
     let mount_info = get_mount_info(path)?;
-    
+
     let mut caps = FilesystemCapabilities::default();
     caps.filesystem_type = classify_unix_filesystem(&mount_info.fstype, &mount_info.mount_point);
-    
+
     // Set capabilities based on filesystem type
     match mount_info.fstype.as_str() {
         // Network filesystems - limited capabilities
@@ -468,28 +479,28 @@ fn detect_unix_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabili
             caps.supports_ownership = false; // Usually fails due to uid mapping
             caps.supports_extended_attributes = false;
             caps.filesystem_type = FilesystemType::Network;
-        },
+        }
         // Temporary filesystems
         "tmpfs" | "ramfs" => {
             caps.filesystem_type = FilesystemType::Tmpfs;
-        },
+        }
         // FAT filesystems - very limited
         "vfat" | "fat32" | "msdos" => {
             caps.supports_ownership = false;
             caps.supports_permissions = false; // Only basic read-only attribute
             caps.supports_extended_attributes = false;
-        },
+        }
         // NTFS via ntfs-3g - mixed capabilities
         "ntfs" | "fuseblk" => {
             caps.supports_ownership = false; // Usually mapped to mount user
             caps.supports_extended_attributes = false;
-        },
+        }
         // Full-featured filesystems (ext4, xfs, btrfs, zfs)
         _ => {
             // Keep default full capabilities
         }
     }
-    
+
     Ok(caps)
 }
 
@@ -498,27 +509,26 @@ fn detect_unix_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabili
 fn get_mount_info(path: &Path) -> Result<MountInfo> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
-    
+
     let canonical_path = std::fs::canonicalize(path)
         .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
-    
-    let file = File::open("/proc/mounts")
-        .context("Failed to open /proc/mounts")?;
+
+    let file = File::open("/proc/mounts").context("Failed to open /proc/mounts")?;
     let reader = BufReader::new(file);
-    
+
     let mut best_match = MountInfo {
         mount_point: "/".to_string(),
         fstype: "unknown".to_string(),
     };
     let mut best_match_len = 0;
-    
+
     for line in reader.lines() {
         let line = line.context("Failed to read line from /proc/mounts")?;
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 3 {
             let mount_point = parts[1];
             let fstype = parts[2];
-            
+
             // Find the longest matching mount point
             if canonical_path.starts_with(mount_point) && mount_point.len() > best_match_len {
                 best_match = MountInfo {
@@ -529,7 +539,7 @@ fn get_mount_info(path: &Path) -> Result<MountInfo> {
             }
         }
     }
-    
+
     Ok(best_match)
 }
 
@@ -547,8 +557,11 @@ fn classify_unix_filesystem(fstype: &str, mount_point: &str) -> FilesystemType {
         "tmpfs" | "ramfs" => FilesystemType::Tmpfs,
         _ => {
             // Also check mount point patterns for network mounts
-            if mount_point.starts_with("/mnt/") || mount_point.starts_with("/media/") 
-                || mount_point.starts_with("/net/") || mount_point.starts_with("/smb/") {
+            if mount_point.starts_with("/mnt/")
+                || mount_point.starts_with("/media/")
+                || mount_point.starts_with("/net/")
+                || mount_point.starts_with("/smb/")
+            {
                 FilesystemType::Network
             } else {
                 FilesystemType::Local
@@ -562,9 +575,9 @@ fn classify_unix_filesystem(fstype: &str, mount_point: &str) -> FilesystemType {
 fn detect_windows_filesystem_capabilities(path: &Path) -> Result<FilesystemCapabilities> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    
+
     let mut caps = FilesystemCapabilities::default();
-    
+
     // Check if it's a UNC path (network)
     if let Some(path_str) = path.to_str() {
         if path_str.starts_with("\\\\") {
@@ -574,57 +587,69 @@ fn detect_windows_filesystem_capabilities(path: &Path) -> Result<FilesystemCapab
             return Ok(caps);
         }
     }
-    
+
     // For local paths, try to get volume information
     let root_path = get_volume_root(path)?;
-    let root_wide: Vec<u16> = OsStr::new(&root_path).encode_wide().chain(std::iter::once(0)).collect();
-    
+    let root_wide: Vec<u16> = OsStr::new(&root_path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
     let mut fs_name = [0u16; 256];
     let mut volume_flags = 0u32;
-    
+
     unsafe {
         let success = winapi::um::fileapi::GetVolumeInformationW(
             root_wide.as_ptr(),
-            std::ptr::null_mut(), 0,
+            std::ptr::null_mut(),
+            0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             &mut volume_flags,
-            fs_name.as_mut_ptr(), fs_name.len() as u32,
+            fs_name.as_mut_ptr(),
+            fs_name.len() as u32,
         );
-        
+
         if success != 0 {
             let fs_name_str = String::from_utf16_lossy(&fs_name);
             let fs_name_clean = fs_name_str.trim_end_matches('\0').to_lowercase();
-            
+
             match fs_name_clean.as_str() {
                 "fat" | "fat32" | "exfat" => {
                     caps.supports_ownership = false;
                     caps.supports_permissions = false;
                     caps.supports_extended_attributes = false;
-                },
+                }
                 _ => {
                     // NTFS and other filesystems usually support most features
                 }
             }
         }
     }
-    
+
     Ok(caps)
 }
 
 #[cfg(windows)]
 fn get_volume_root(path: &Path) -> Result<String> {
     let path_str = path.to_str().context("Invalid path encoding")?;
-    
+
     if path_str.len() >= 2 && path_str.chars().nth(1) == Some(':') {
-        Ok(format!("{}:\\", path_str.chars().nth(0).unwrap().to_uppercase()))
+        if let Some(drive_letter) = path_str.chars().nth(0) {
+            Ok(format!("{}:\\", drive_letter.to_uppercase()))
+        } else {
+            Ok("\\".to_string())
+        }
     } else {
         Ok("\\".to_string())
     }
 }
 
 /// Filter copy flags based on filesystem capabilities
-pub fn filter_copy_flags_for_filesystem(flags: &CopyFlags, caps: &FilesystemCapabilities) -> CopyFlags {
+pub fn filter_copy_flags_for_filesystem(
+    flags: &CopyFlags,
+    caps: &FilesystemCapabilities,
+) -> CopyFlags {
     CopyFlags {
         data: flags.data, // Always preserve data
         attributes: flags.attributes && caps.supports_extended_attributes,
@@ -647,15 +672,17 @@ pub fn is_network_path(path: &Path) -> bool {
                     return path_str.starts_with("\\\\");
                 }
             }
-            
+
             #[cfg(unix)]
             {
                 if let Some(path_str) = path.to_str() {
-                    return path_str.starts_with("/mnt/") || path_str.starts_with("/media/") 
-                        || path_str.starts_with("/net/") || path_str.starts_with("/smb/");
+                    return path_str.starts_with("/mnt/")
+                        || path_str.starts_with("/media/")
+                        || path_str.starts_with("/net/")
+                        || path_str.starts_with("/smb/");
                 }
             }
-            
+
             false
         }
     }
@@ -674,53 +701,67 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
             }
         }
     }
-    
+
     // Use unbuffered I/O for better performance on large files
     use std::fs::File;
     use std::io::{Read, Write};
-    
+
     // Use much larger buffer for network transfers (32MB)
     const NETWORK_BUFFER_SIZE: usize = 32 * 1024 * 1024;
-    
+
     let mut source_file = File::open(source)
         .with_context(|| format!("Failed to open source file: {}", source.display()))?;
-    let mut dest_file = File::create(destination)
-        .with_context(|| format!("Failed to create destination file: {}", destination.display()))?;
-    
+    let mut dest_file = File::create(destination).with_context(|| {
+        format!(
+            "Failed to create destination file: {}",
+            destination.display()
+        )
+    })?;
+
     // Pre-allocate destination file for better performance
     if let Ok(metadata) = source_file.metadata() {
         let _ = dest_file.set_len(metadata.len());
     }
-    
+
     // Direct I/O without buffering for maximum throughput
     let mut buffer = vec![0u8; NETWORK_BUFFER_SIZE];
     let mut total_bytes = 0u64;
-    
+
     loop {
-        let bytes_read = source_file.read(&mut buffer)
+        let bytes_read = source_file
+            .read(&mut buffer)
             .with_context(|| format!("Failed to read from source: {}", source.display()))?;
-        
+
         if bytes_read == 0 {
             break;
         }
-        
-        dest_file.write_all(&buffer[..bytes_read])
-            .with_context(|| format!("Failed to write to destination: {}", destination.display()))?;
-        
+
+        dest_file
+            .write_all(&buffer[..bytes_read])
+            .with_context(|| {
+                format!("Failed to write to destination: {}", destination.display())
+            })?;
+
         total_bytes += bytes_read as u64;
     }
-    
-    dest_file.sync_all()
+
+    dest_file
+        .sync_all()
         .with_context(|| format!("Failed to sync destination: {}", destination.display()))?;
-    
+
     Ok(total_bytes)
 }
 
 #[cfg(windows)]
 fn windows_native_copy(source: &Path, destination: &Path) -> Result<u64> {
     // Use standard fs::copy which on Windows uses CopyFileW internally
-    fs::copy(source, destination)
-        .with_context(|| format!("Failed to copy file: {} -> {}", source.display(), destination.display()))
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "Failed to copy file: {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 #[cfg(test)]

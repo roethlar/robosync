@@ -63,15 +63,11 @@ impl FastFileListGenerator {
     }
 
     /// Generate file list with fast enumeration
-    pub fn generate_file_list(
-        &self,
-        root: &Path,
-        options: &SyncOptions,
-    ) -> Result<Vec<FileInfo>> {
+    pub fn generate_file_list(&self, root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
         let start_time = Instant::now();
-        
+
         // Starting fast file enumeration
-        
+
         // Use platform-optimized implementation if available
         #[cfg(target_os = "linux")]
         if let Ok(files) = self.generate_with_jwalk(root, options) {
@@ -87,14 +83,14 @@ impl FastFileListGenerator {
     /// Linux-specific optimized implementation using jwalk
     #[cfg(target_os = "linux")]
     fn generate_with_jwalk(&self, root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
-        use jwalk::{WalkDir as JWalkDir, Parallelism};
-        
+        use jwalk::{Parallelism, WalkDir as JWalkDir};
+
         let file_count = AtomicUsize::new(0);
         let last_update = Arc::new(Mutex::new(Instant::now()));
-        
+
         // Clone exclude_dirs for use in closure
         let exclude_dirs = options.exclude_dirs.clone();
-        
+
         // Configure jwalk for optimal performance
         let entries: Result<Vec<FileInfo>, _> = JWalkDir::new(root)
             .parallelism(Parallelism::RayonNewPool(self.config.scan_threads))
@@ -113,7 +109,7 @@ impl FastFileListGenerator {
                         }
                     }
                 }
-                
+
                 // Skip permission errors during directory traversal
                 children.retain(|entry| {
                     if let Err(e) = entry {
@@ -133,42 +129,51 @@ impl FastFileListGenerator {
                 match entry {
                     Ok(entry) => {
                         let path = entry.path();
-                        
+
                         // Skip the root directory itself
                         if path == root {
                             return None;
                         }
-                        
+
                         // Get metadata efficiently
                         let metadata = match entry.metadata() {
                             Ok(m) => m,
                             Err(_) => return None,
                         };
-                        
+
                         let is_symlink = metadata.is_symlink();
                         let symlink_target = if is_symlink {
                             std::fs::read_link(&path).ok()
                         } else {
                             None
                         };
-                        
+
                         let file_info = FileInfo {
                             path: path.clone(),
                             size: metadata.len(),
-                            modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            modified: metadata
+                                .modified()
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                             is_directory: metadata.is_dir(),
                             is_symlink,
                             symlink_target,
                             checksum: None,
                         };
-                        
+
                         // Debug suspicious paths
-                        if file_info.path.to_string_lossy().contains("/home/michael/Documents/home/") {
-                            eprintln!("JWALK ERROR: Enumerated file with doubled path: {}", file_info.path.display());
+                        if file_info
+                            .path
+                            .to_string_lossy()
+                            .contains("/home/michael/Documents/home/")
+                        {
+                            eprintln!(
+                                "JWALK ERROR: Enumerated file with doubled path: {}",
+                                file_info.path.display()
+                            );
                             eprintln!("  Root: {}", root.display());
                             eprintln!("  Entry path: {}", path.display());
                         }
-                        
+
                         // Apply filters
                         if self.should_include_file(&file_info, root, options) {
                             // Update progress periodically
@@ -178,17 +183,22 @@ impl FastFileListGenerator {
                                     // Only update if enough time has passed to avoid overhead
                                     let now = Instant::now();
                                     let should_update = {
-                                        let last = last_update.lock().unwrap();
-                                        now.duration_since(*last) >= Duration::from_millis(500)
+                                        if let Ok(last) = last_update.lock() {
+                                            now.duration_since(*last) >= Duration::from_millis(500)
+                                        } else {
+                                            false
+                                        }
                                     };
-                                    
+
                                     if should_update {
-                                        *last_update.lock().unwrap() = now;
+                                        if let Ok(mut last) = last_update.lock() {
+                                            *last = now;
+                                        }
                                         progress.print_update();
                                     }
                                 }
                             }
-                            
+
                             Some(Ok(file_info))
                         } else {
                             None
@@ -206,7 +216,7 @@ impl FastFileListGenerator {
                 }
             })
             .collect();
-        
+
         entries
     }
 
@@ -215,22 +225,22 @@ impl FastFileListGenerator {
         // First, quickly enumerate all directory entries
         // println!("Scanning directory structure...");
         let entries = self.collect_entries_fast(root)?;
-        
+
         // println!("Processing {} entries...", entries.len());
-        
+
         if let Some(ref progress) = self.progress {
             progress.print_update();
         }
-        
+
         // Process entries in parallel batches
         let file_count = AtomicUsize::new(0);
         let last_update = Arc::new(Mutex::new(Instant::now()));
-        
+
         let files: Result<Vec<_>, _> = entries
             .par_chunks(self.config.batch_size)
             .map(|chunk| {
                 let mut batch_files = Vec::with_capacity(chunk.len());
-                
+
                 for path in chunk {
                     // Get metadata
                     match std::fs::symlink_metadata(path) {
@@ -241,58 +251,72 @@ impl FastFileListGenerator {
                             } else {
                                 None
                             };
-                            
+
                             let file_info = FileInfo {
                                 path: path.to_path_buf(),
                                 size: metadata.len(),
-                                modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                modified: metadata
+                                    .modified()
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                 is_directory: metadata.is_dir(),
                                 is_symlink,
                                 symlink_target,
                                 checksum: None,
                             };
-                            
+
                             // Debug suspicious paths
-                            if file_info.path.to_string_lossy().contains("/home/michael/Documents/home/") {
-                                eprintln!("RAYON ERROR: Enumerated file with doubled path: {}", file_info.path.display());
+                            if file_info
+                                .path
+                                .to_string_lossy()
+                                .contains("/home/michael/Documents/home/")
+                            {
+                                eprintln!(
+                                    "RAYON ERROR: Enumerated file with doubled path: {}",
+                                    file_info.path.display()
+                                );
                                 eprintln!("  Root: {}", root.display());
                             }
-                            
+
                             // Apply filters
                             if self.should_include_file(&file_info, root, options) {
                                 batch_files.push(file_info);
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to read metadata for {:?}: {}", path, e);
+                            eprintln!("Warning: Failed to read metadata for {path:?}: {e}");
                         }
                     }
                 }
-                
+
                 // Update progress
                 let count = file_count.fetch_add(batch_files.len(), Ordering::Relaxed);
                 if count % self.config.progress_interval < batch_files.len() {
                     if let Some(ref progress) = self.progress {
                         let now = Instant::now();
                         let should_update = {
-                            let last = last_update.lock().unwrap();
-                            now.duration_since(*last) >= Duration::from_millis(500)
+                            if let Ok(last) = last_update.lock() {
+                                now.duration_since(*last) >= Duration::from_millis(500)
+                            } else {
+                                false
+                            }
                         };
-                        
+
                         if should_update {
-                            *last_update.lock().unwrap() = now;
+                            if let Ok(mut last) = last_update.lock() {
+                                *last = now;
+                            }
                             progress.print_update();
                         }
                     }
                 }
-                
+
                 Ok::<Vec<FileInfo>, anyhow::Error>(batch_files)
             })
             .collect();
-        
+
         let file_batches = files?;
         let all_files: Vec<FileInfo> = file_batches.into_iter().flatten().collect();
-        
+
         // println!("Enumerated {} files", all_files.len());
         Ok(all_files)
     }
@@ -301,7 +325,7 @@ impl FastFileListGenerator {
     fn collect_entries_fast(&self, root: &Path) -> Result<Vec<PathBuf>> {
         // Use walkdir with optimizations
         use walkdir::WalkDir;
-        
+
         let entries: Vec<PathBuf> = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
@@ -310,22 +334,23 @@ impl FastFileListGenerator {
                     Ok(entry) => {
                         let path = entry.path().to_path_buf();
                         // Skip the root directory itself
-                        if path == root {
-                            None
-                        } else {
-                            Some(path)
-                        }
-                    },
+                        if path == root { None } else { Some(path) }
+                    }
                     Err(_) => None,
                 }
             })
             .collect();
-        
+
         Ok(entries)
     }
 
     /// Apply file filtering logic (copied from file_list.rs for performance)
-    fn should_include_file(&self, file_info: &FileInfo, root: &Path, options: &SyncOptions) -> bool {
+    fn should_include_file(
+        &self,
+        file_info: &FileInfo,
+        root: &Path,
+        options: &SyncOptions,
+    ) -> bool {
         // Get relative path for pattern matching
         let relative_path = match file_info.path.strip_prefix(root) {
             Ok(path) => path,
@@ -486,11 +511,14 @@ pub fn compare_file_lists_fast(
             for source_file in chunk {
                 if let Ok(relative_path) = source_file.path.strip_prefix(source_root) {
                     let relative_path = relative_path.to_path_buf();
-                    
+
                     // Skip any paths that would create a home directory structure
                     if relative_path.starts_with("home/") {
-                        eprintln!("WARNING: Skipping file with suspicious path: {} (relative: {})", 
-                            source_file.path.display(), relative_path.display());
+                        eprintln!(
+                            "WARNING: Skipping file with suspicious path: {} (relative: {})",
+                            source_file.path.display(),
+                            relative_path.display()
+                        );
                         continue;
                     }
 
@@ -585,12 +613,17 @@ pub fn compare_file_lists_fast(
             if let Some(ref progress) = progress {
                 let now = Instant::now();
                 let should_update = {
-                    let last = last_update.lock().unwrap();
-                    now.duration_since(*last) >= Duration::from_millis(1000)
+                    if let Ok(last) = last_update.lock() {
+                        now.duration_since(*last) >= Duration::from_millis(1000)
+                    } else {
+                        false
+                    }
                 };
 
                 if should_update {
-                    *last_update.lock().unwrap() = now;
+                    if let Ok(mut last) = last_update.lock() {
+                        *last = now;
+                    }
                     progress.print_update();
                 }
             }

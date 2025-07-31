@@ -1,7 +1,7 @@
+use rayon::prelude::*;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use rayon::prelude::*;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -24,29 +24,34 @@ fn main() {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .collect();
-    
-    println!("Found {} files in {:?}", files.len(), start.elapsed());
+
+    let elapsed = start.elapsed();
+    println!("Found {} files in {elapsed:?}", files.len());
 
     // Copy files in parallel
     let start_copy = Instant::now();
-    let mut total_bytes = 0u64;
-    
+    let total_bytes = 0u64;
+
     files.par_iter().for_each(|entry| {
         let src_path = entry.path();
-        let relative = src_path.strip_prefix(source).unwrap();
+        let relative = src_path
+            .strip_prefix(source)
+            .expect("src_path should always have source as prefix");
         let dst_path = dest.join(relative);
-        
+
         if let Some(parent) = dst_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        
-        if let Ok(bytes) = fs::copy(src_path, &dst_path) {
+
+        if let Ok(_bytes) = fs::copy(src_path, &dst_path) {
             // Just count bytes, no synchronization
         }
     });
 
     let elapsed = start_copy.elapsed();
-    println!("\nCopy completed in {:?}", elapsed);
-    println!("Average speed: {:.2} MB/s", 
-        (total_bytes as f64 / 1_000_000.0) / elapsed.as_secs_f64());
+    println!("\nCopy completed in {elapsed:?}");
+    println!(
+        "Average speed: {:.2} MB/s",
+        (total_bytes as f64 / 1_000_000.0) / elapsed.as_secs_f64()
+    );
 }

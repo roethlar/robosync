@@ -4,14 +4,14 @@
 //! handling their execution, progress parsing, and error handling.
 
 use anyhow::{Context, Result, bail};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::io::{BufReader, BufRead};
 use std::sync::Arc;
 use std::thread;
 
-use crate::sync_stats::SyncStats;
 use crate::progress::{SyncProgress, ToolType};
+use crate::sync_stats::SyncStats;
 
 /// Wrapper for native rsync command
 pub struct RsyncWrapper {
@@ -26,26 +26,26 @@ impl RsyncWrapper {
             progress_manager: None,
         }
     }
-    
+
     pub fn with_progress(mut self, progress_manager: Arc<SyncProgress>) -> Self {
         self.progress_manager = Some(progress_manager);
         self
     }
-    
+
     /// Execute rsync with the given source and destination
     pub fn execute(&self, source: &Path, destination: &Path) -> Result<SyncStats> {
         let mut cmd = Command::new("rsync");
-        
+
         // Add our extra arguments
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
-        
+
         // Add progress flag if we have a progress tracker
         if self.progress_manager.is_some() {
             cmd.arg("--info=progress2");
         }
-        
+
         // Add source and destination
         // Ensure trailing slash on source for consistent behavior
         let source_str = if source.is_dir() {
@@ -53,19 +53,18 @@ impl RsyncWrapper {
         } else {
             source.display().to_string()
         };
-        
+
         cmd.arg(&source_str);
         cmd.arg(destination);
-        
+
         // Set up for output capture
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        
-        let mut child = cmd.spawn()
-            .context("Failed to execute rsync")?;
-        
+
+        let mut child = cmd.spawn().context("Failed to execute rsync")?;
+
         let stats = Arc::new(SyncStats::default());
-        
+
         // Spawn thread to parse progress output
         if let Some(stdout) = child.stdout.take() {
             if let Some(ref progress_manager) = self.progress_manager {
@@ -86,15 +85,14 @@ impl RsyncWrapper {
                 });
             }
         }
-        
+
         // Wait for completion
-        let status = child.wait()
-            .context("Failed to wait for rsync")?;
-        
+        let status = child.wait().context("Failed to wait for rsync")?;
+
         if !status.success() {
             bail!("rsync failed with status: {}", status);
         }
-        
+
         // Return the stats
         Ok(Arc::try_unwrap(stats).unwrap_or_else(|arc| (*arc).clone()))
     }
@@ -115,39 +113,38 @@ impl RobocopyWrapper {
             progress_manager: None,
         }
     }
-    
+
     pub fn with_progress(mut self, progress_manager: Arc<SyncProgress>) -> Self {
         self.progress_manager = Some(progress_manager);
         self
     }
-    
+
     /// Execute robocopy with the given source and destination
     pub fn execute(&self, source: &Path, destination: &Path) -> Result<SyncStats> {
         let mut cmd = Command::new("robocopy");
-        
+
         // Add source and destination
         cmd.arg(source);
         cmd.arg(destination);
-        
+
         // Add our extra arguments
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
-        
+
         // Add progress flag
         cmd.arg("/NP"); // No progress in output (we'll track separately)
         cmd.arg("/BYTES"); // Show sizes in bytes
-        
+
         // Set up for output capture
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        
-        let mut child = cmd.spawn()
-            .context("Failed to execute robocopy")?;
-        
+
+        let mut child = cmd.spawn().context("Failed to execute robocopy")?;
+
         let stats = Arc::new(SyncStats::default());
         let stats_clone = Arc::clone(&stats);
-        
+
         // Spawn thread to parse output
         if let Some(stdout) = child.stdout.take() {
             if let Some(ref progress_manager) = self.progress_manager {
@@ -174,11 +171,10 @@ impl RobocopyWrapper {
                 });
             }
         }
-        
+
         // Wait for completion
-        let status = child.wait()
-            .context("Failed to wait for robocopy")?;
-        
+        let status = child.wait().context("Failed to wait for robocopy")?;
+
         // Robocopy exit codes:
         // 0 = No files copied
         // 1 = Files copied successfully
@@ -186,7 +182,7 @@ impl RobocopyWrapper {
         // 4 = Mismatched files/dirs
         // 8 = Copy errors occurred
         // 16 = Fatal error
-        
+
         match status.code() {
             Some(0) | Some(1) | Some(2) | Some(3) => {
                 // Success cases (0-3 are all non-error states)
@@ -198,17 +194,17 @@ impl RobocopyWrapper {
                 bail!("robocopy failed with unknown status");
             }
         }
-        
+
         // Return the stats
         Ok(Arc::try_unwrap(stats).unwrap_or_else(|arc| (*arc).clone()))
     }
-    
+
     /// Parse robocopy file copy lines
     fn parse_file_line(line: &str, stats: &Arc<SyncStats>) -> bool {
         // Robocopy output examples:
         // "      New File              123456    filename.txt"
         // "      Newer                 654321    updated.doc"
-        
+
         if line.contains("New File") || line.contains("Newer") || line.contains("Older") {
             // Try to extract file size
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -219,7 +215,7 @@ impl RobocopyWrapper {
                 }
             }
         }
-        
+
         false
     }
 }
@@ -233,7 +229,7 @@ impl NativeToolExecutor {
     pub fn new(dry_run: bool) -> Self {
         Self { dry_run }
     }
-    
+
     /// Execute rsync with given options, with fallback
     #[cfg(unix)]
     pub fn run_rsync(
@@ -244,35 +240,38 @@ impl NativeToolExecutor {
         progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         if self.dry_run {
-            println!("Would execute: rsync {} {} {}", 
-                args.join(" "), 
-                source.display(), 
+            println!(
+                "Would execute: rsync {} {} {}",
+                args.join(" "),
+                source.display(),
                 destination.display()
             );
             return Ok(SyncStats::default());
         }
-        
+
         // Check if rsync is available
         if !Self::is_rsync_available() {
             eprintln!("Warning: rsync not found, falling back to built-in implementation");
             return self.fallback_to_builtin(source, destination, progress_manager.clone());
         }
-        
+
         let mut wrapper = RsyncWrapper::new(args);
         let progress_manager_clone = progress_manager.clone();
         if let Some(pm) = progress_manager {
             wrapper = wrapper.with_progress(pm);
         }
-        
+
         match wrapper.execute(source, destination) {
             Ok(stats) => Ok(stats),
             Err(e) => {
-                eprintln!("Warning: rsync failed ({}), falling back to built-in implementation", e);
+                eprintln!(
+                    "Warning: rsync failed ({e}), falling back to built-in implementation"
+                );
                 self.fallback_to_builtin(source, destination, progress_manager_clone)
             }
         }
     }
-    
+
     /// Execute robocopy with given options, with fallback
     #[cfg(target_os = "windows")]
     pub fn run_robocopy(
@@ -283,35 +282,38 @@ impl NativeToolExecutor {
         progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         if self.dry_run {
-            println!("Would execute: robocopy {} {} {}", 
-                source.display(), 
+            println!(
+                "Would execute: robocopy {} {} {}",
+                source.display(),
                 destination.display(),
                 args.join(" ")
             );
             return Ok(SyncStats::default());
         }
-        
+
         // Check if robocopy is available
         if !Self::is_robocopy_available() {
             eprintln!("Warning: robocopy not found, falling back to built-in implementation");
             return self.fallback_to_builtin(source, destination, progress_manager.clone());
         }
-        
+
         let mut wrapper = RobocopyWrapper::new(args);
         let progress_manager_clone = progress_manager.clone();
         if let Some(pm) = progress_manager {
             wrapper = wrapper.with_progress(pm);
         }
-        
+
         match wrapper.execute(source, destination) {
             Ok(stats) => Ok(stats),
             Err(e) => {
-                eprintln!("Warning: robocopy failed ({}), falling back to built-in implementation", e);
+                eprintln!(
+                    "Warning: robocopy failed ({e}), falling back to built-in implementation"
+                );
                 self.fallback_to_builtin(source, destination, progress_manager_clone)
             }
         }
     }
-    
+
     /// Check if rsync is available
     #[cfg(unix)]
     pub fn is_rsync_available() -> bool {
@@ -321,7 +323,7 @@ impl NativeToolExecutor {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-    
+
     /// Check if robocopy is available
     #[cfg(target_os = "windows")]
     pub fn is_robocopy_available() -> bool {
@@ -331,7 +333,7 @@ impl NativeToolExecutor {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-    
+
     /// Fallback to built-in implementation when native tools are unavailable
     fn fallback_to_builtin(
         &self,
@@ -340,27 +342,27 @@ impl NativeToolExecutor {
         progress_manager: Option<Arc<SyncProgress>>,
     ) -> Result<SyncStats> {
         use crate::options::SyncOptions;
-        use crate::parallel_sync::{ParallelSyncer, ParallelSyncConfig};
-        
+        use crate::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
+
         println!("Using built-in RoboSync implementation...");
-        
+
         // Create default options
         let options = SyncOptions {
             dry_run: self.dry_run,
             no_progress: progress_manager.is_none(),
             ..Default::default()
         };
-        
+
         // Use our parallel sync implementation
         let config = ParallelSyncConfig::default();
         let syncer = ParallelSyncer::new(config);
-        
+
         // Create a simple wrapper that uses our progress manager if available
         if let Some(pm) = progress_manager {
             // The parallel syncer will handle its own progress, but we can monitor
             pm.set_current_file("Running built-in sync implementation");
         }
-        
+
         syncer.synchronize_with_options(source.to_path_buf(), destination.to_path_buf(), options)
     }
 }
@@ -368,7 +370,7 @@ impl NativeToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     #[cfg(unix)]
     fn test_rsync_available() {
@@ -376,7 +378,7 @@ mod tests {
         let available = NativeToolExecutor::is_rsync_available();
         println!("rsync available: {}", available);
     }
-    
+
     #[test]
     #[cfg(target_os = "windows")]
     fn test_robocopy_available() {

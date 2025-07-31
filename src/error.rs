@@ -29,9 +29,7 @@ pub enum RoboSyncError {
 
     /// File not found errors
     #[error("File or directory not found: {path}")]
-    NotFound {
-        path: PathBuf,
-    },
+    NotFound { path: PathBuf },
 
     /// File synchronization specific errors
     #[error("Synchronization failed: {reason}")]
@@ -43,10 +41,7 @@ pub enum RoboSyncError {
 
     /// Delta algorithm errors
     #[error("Delta transfer failed: {message}")]
-    DeltaFailed {
-        message: String,
-        file_path: PathBuf,
-    },
+    DeltaFailed { message: String, file_path: PathBuf },
 
     /// Compression/decompression errors
     #[error("Compression error: {operation} failed")]
@@ -70,7 +65,6 @@ pub enum RoboSyncError {
         reason: String,
         attempted_strategy: Option<String>,
     },
-
 
     /// Thread pool or parallel processing errors
     #[error("Parallel processing error: {message}")]
@@ -113,10 +107,7 @@ pub enum RoboSyncError {
 
     /// Generic operation errors for edge cases
     #[error("Operation failed: {operation} - {message}")]
-    OperationFailed {
-        operation: String,
-        message: String,
-    },
+    OperationFailed { operation: String, message: String },
 }
 
 impl RoboSyncError {
@@ -185,16 +176,12 @@ impl RoboSyncError {
     }
 
     /// Create a strategy selection error
-    pub fn strategy_error(
-        reason: impl Into<String>,
-        attempted_strategy: Option<String>,
-    ) -> Self {
+    pub fn strategy_error(reason: impl Into<String>, attempted_strategy: Option<String>) -> Self {
         Self::StrategyError {
             reason: reason.into(),
             attempted_strategy,
         }
     }
-
 
     /// Create a parallel processing error
     pub fn parallel_error(message: impl Into<String>, thread_count: Option<usize>) -> Self {
@@ -255,36 +242,27 @@ impl RoboSyncError {
     }
 
     /// Create a generic operation failure error
-    pub fn operation_failed(
-        operation: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn operation_failed(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self::OperationFailed {
             operation: operation.into(),
             message: message.into(),
         }
     }
-    
+
     /// Create a serialization error
     pub fn serialization(
         context: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::operation_failed(
-            "serialization",
-            format!("{}: {}", context.into(), source)
-        )
+        Self::operation_failed("serialization", format!("{}: {}", context.into(), source))
     }
-    
+
     /// Create a deserialization error
     pub fn deserialization(
         context: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::operation_failed(
-            "deserialization",
-            format!("{}: {}", context.into(), source)
-        )
+        Self::operation_failed("deserialization", format!("{}: {}", context.into(), source))
     }
 }
 
@@ -316,7 +294,7 @@ impl From<serde_json::Error> for RoboSyncError {
 pub trait IoErrorExt<T> {
     /// Add path context to an I/O error
     fn with_path(self, path: PathBuf) -> Result<T>;
-    
+
     /// Add path context for permission errors
     fn with_permission_context(self, path: PathBuf) -> Result<T>;
 }
@@ -338,22 +316,17 @@ where
         F: FnOnce() -> String,
     {
         self.map_err(|e| {
-            RoboSyncError::operation_failed(
-                "context_operation",
-                format!("{}: {}", f(), e)
-            )
+            RoboSyncError::operation_failed("context_operation", format!("{}: {}", f(), e))
         })
     }
 }
 
 impl<T> IoErrorExt<T> for std::result::Result<T, io::Error> {
     fn with_path(self, path: PathBuf) -> Result<T> {
-        self.map_err(|e| {
-            match e.kind() {
-                io::ErrorKind::NotFound => RoboSyncError::not_found(path),
-                io::ErrorKind::PermissionDenied => RoboSyncError::permission_error(e, path),
-                _ => RoboSyncError::io_error(e, Some(path)),
-            }
+        self.map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => RoboSyncError::not_found(path),
+            io::ErrorKind::PermissionDenied => RoboSyncError::permission_error(e, path),
+            _ => RoboSyncError::io_error(e, Some(path)),
         })
     }
 
@@ -365,21 +338,20 @@ impl<T> IoErrorExt<T> for std::result::Result<T, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_error_creation() {
         let path = PathBuf::from("/test/path");
-        
+
         // Test I/O error creation
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let error = RoboSyncError::io_error(io_err, Some(path.clone()));
         assert!(matches!(error, RoboSyncError::Io { .. }));
-        
+
         // Test not found error
         let error = RoboSyncError::not_found(path.clone());
         assert!(matches!(error, RoboSyncError::NotFound { .. }));
-        
+
         // Test sync failure
         let error = RoboSyncError::sync_failed("test failure", Some(path.clone()), None);
         assert!(matches!(error, RoboSyncError::SyncFailed { .. }));
@@ -388,11 +360,14 @@ mod tests {
     #[test]
     fn test_io_error_ext() {
         let path = PathBuf::from("/test/path");
-        
+
         // Test successful operation
         let result: std::result::Result<i32, io::Error> = Ok(42);
-        assert_eq!(result.with_path(path.clone()).unwrap(), 42);
-        
+        assert_eq!(
+            result.with_path(path.clone()).expect("Result should be Ok"),
+            42
+        );
+
         // Test error conversion
         let io_err = io::Error::new(io::ErrorKind::NotFound, "not found");
         let result: std::result::Result<i32, io::Error> = Err(io_err);

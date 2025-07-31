@@ -1,7 +1,9 @@
 //! Main synchronization logic
 
 use crate::algorithm::{DeltaAlgorithm, Match};
-use crate::file_list::{compare_file_lists_with_roots, generate_file_list_with_options, FileOperation};
+use crate::file_list::{
+    FileOperation, compare_file_lists_with_roots, generate_file_list_with_options,
+};
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
 use anyhow::{Context, Result};
@@ -80,18 +82,20 @@ pub fn synchronize_with_options(
     let dest_parent = if destination.exists() {
         destination.clone()
     } else {
-        destination.parent()
+        destination
+            .parent()
             .ok_or_else(|| anyhow::anyhow!("Destination has no parent directory"))?
             .to_path_buf()
     };
-    
+
     if let Ok(capabilities) = crate::metadata::detect_filesystem_capabilities(&dest_parent) {
         // Debug output
         // Detected filesystem type and ownership support
-        
+
         let original_flags = crate::metadata::CopyFlags::from_string(&options.copy_flags);
-        let filtered_flags = crate::metadata::filter_copy_flags_for_filesystem(&original_flags, &capabilities);
-        
+        let filtered_flags =
+            crate::metadata::filter_copy_flags_for_filesystem(&original_flags, &capabilities);
+
         // Warn user if flags were filtered
         let mut filtered_out = Vec::new();
         if original_flags.owner && !filtered_flags.owner {
@@ -106,34 +110,50 @@ pub fn synchronize_with_options(
         if original_flags.timestamps && !filtered_flags.timestamps {
             filtered_out.push("Timestamps (T)");
         }
-        
+
         if !filtered_out.is_empty() {
             match capabilities.filesystem_type {
                 crate::metadata::FilesystemType::Network => {
-                    println!("Warning: Network filesystem detected. The following copy flags may fail and have been disabled:");
-                },
+                    println!(
+                        "Warning: Network filesystem detected. The following copy flags may fail and have been disabled:"
+                    );
+                }
                 crate::metadata::FilesystemType::Tmpfs => {
-                    println!("Warning: Temporary filesystem detected. The following copy flags may fail and have been disabled:");
-                },
+                    println!(
+                        "Warning: Temporary filesystem detected. The following copy flags may fail and have been disabled:"
+                    );
+                }
                 _ => {
-                    println!("Warning: Filesystem limitations detected. The following copy flags have been disabled:");
+                    println!(
+                        "Warning: Filesystem limitations detected. The following copy flags have been disabled:"
+                    );
                 }
             }
             for flag in &filtered_out {
-                println!("  - {}", flag);
+                println!("  - {flag}");
             }
             println!("Consider using -copyflags DAT for cross-filesystem copies.");
         }
-        
+
         // Update options with filtered flags
         let mut new_flags = String::new();
-        if filtered_flags.data { new_flags.push('D'); }
-        if filtered_flags.attributes { new_flags.push('A'); }
-        if filtered_flags.timestamps { new_flags.push('T'); }
-        if filtered_flags.security { new_flags.push('S'); }
-        if filtered_flags.owner { new_flags.push('O'); }
+        if filtered_flags.data {
+            new_flags.push('D');
+        }
+        if filtered_flags.attributes {
+            new_flags.push('A');
+        }
+        if filtered_flags.timestamps {
+            new_flags.push('T');
+        }
+        if filtered_flags.security {
+            new_flags.push('S');
+        }
+        if filtered_flags.owner {
+            new_flags.push('O');
+        }
         // U (auditing) is always filtered out
-        
+
         options.copy_flags = new_flags;
     }
 
@@ -235,7 +255,9 @@ fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
         .filter(|m| matches!(m, Match::Block { .. }))
         .count();
 
-    println!("  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)");
+    println!(
+        "  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)"
+    );
 
     Ok(())
 }
@@ -277,25 +299,21 @@ fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) ->
         source.display(),
         destination.display()
     );
-    
 
     // Generate file lists
-    let source_files = generate_file_list_with_options(source, options).context("Failed to generate source file list")?;
+    let source_files = generate_file_list_with_options(source, options)
+        .context("Failed to generate source file list")?;
 
     let dest_files = if destination.exists() {
-        generate_file_list_with_options(destination, options).context("Failed to generate destination file list")?
+        generate_file_list_with_options(destination, options)
+            .context("Failed to generate destination file list")?
     } else {
         Vec::new()
     };
 
     // Compare file lists to determine operations
-    let operations = compare_file_lists_with_roots(
-        &source_files,
-        &dest_files,
-        source,
-        destination,
-        options,
-    );
+    let operations =
+        compare_file_lists_with_roots(&source_files, &dest_files, source, destination, options);
 
     let total_files = operations.len() as u64;
     let total_bytes: u64 = source_files
@@ -305,7 +323,6 @@ fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) ->
         .sum();
 
     let mut progress = SyncProgress::new(total_files, total_bytes);
-
 
     // Execute operations
     for operation in operations {

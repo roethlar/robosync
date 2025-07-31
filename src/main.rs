@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::{Arg, Command};
-use std::path::PathBuf;
-use robosync::color_output::ConditionalColor;
 use crossterm::style::Color;
+use robosync::color_output::ConditionalColor;
+use std::path::PathBuf;
 
 use robosync::compression::CompressionConfig;
-use robosync::options::{SyncOptions, SymlinkBehavior};
+use robosync::options::{SymlinkBehavior, SyncOptions};
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 use robosync::sync;
 
@@ -216,6 +216,12 @@ fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
+            Arg::new("no-report-errors")
+                .long("no-report-errors")
+                .help("Disable automatic error report file generation")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
             Arg::new("log-file")
                 .long("log")
                 .value_name("FILE")
@@ -312,41 +318,42 @@ fn main() -> Result<()> {
                 .help("Skip symlinks entirely - do not copy symlinks or their targets")
                 .action(clap::ArgAction::SetTrue)
         );
-        
-        #[cfg(target_os = "linux")]
-        let matches = matches.arg(
-            Arg::new("linux-optimized")
-                .long("linux-optimized")
-                .help("Enable Linux-specific optimizations for small files")
-                .action(clap::ArgAction::SetTrue)
-        );
-        
-        #[cfg(not(target_os = "linux"))]
-        let matches = matches;
-        
-        let matches = matches.arg(
-            Arg::new("no-smart")
-                .long("no-smart")
-                .help("Diagnostic: use basic parallel mode instead of mixed mode")
-                .action(clap::ArgAction::SetTrue)
-        );
-        
-        let matches = matches.arg(
+
+    #[cfg(target_os = "linux")]
+    let matches = matches.arg(
+        Arg::new("linux-optimized")
+            .long("linux-optimized")
+            .help("Enable Linux-specific optimizations for small files")
+            .action(clap::ArgAction::SetTrue),
+    );
+
+    #[cfg(not(target_os = "linux"))]
+    let matches = matches;
+
+    let matches = matches.arg(
+        Arg::new("no-smart")
+            .long("no-smart")
+            .help("Diagnostic: use basic parallel mode instead of mixed mode")
+            .action(clap::ArgAction::SetTrue),
+    );
+
+    let matches = matches.arg(
             Arg::new("strategy")
                 .long("strategy")
                 .value_name("METHOD")
                 .help("Diagnostic override: force a specific strategy (delta, mixed, rsync, robocopy, platform)")
                 .value_parser(["delta", "mixed", "rsync", "robocopy", "platform", "io_uring", "parallel"])
         );
-        
-        let matches = matches.arg(
+
+    let matches = matches
+        .arg(
             Arg::new("dry-run")
                 .short('n')
                 .short_alias('N')
                 .long("dry-run")
                 .alias("dryrun")
                 .help("Show what would be done without actually doing it")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("checksum")
@@ -355,25 +362,30 @@ fn main() -> Result<()> {
                 .alias("Checksum")
                 .alias("CHECKSUM")
                 .help("Skip based on checksum, not mod-time & size")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 
     // For regular sync operations, source and destination are required
-    let source_arg: PathBuf = matches.get_one::<PathBuf>("source")
+    let source_arg: PathBuf = matches
+        .get_one::<PathBuf>("source")
         .ok_or_else(|| anyhow::anyhow!("Source path required"))?
         .clone();
-    let destination: PathBuf = matches.get_one::<PathBuf>("destination")
+    let destination: PathBuf = matches
+        .get_one::<PathBuf>("destination")
         .ok_or_else(|| anyhow::anyhow!("Destination path required"))?
         .clone();
-    
+
     // Use the source path as-is to maintain correct path structure
     // Don't canonicalize as it breaks path stripping when source is a symlink
     let source = source_arg.clone();
-    
+
     // Check if the source exists
     if !source.exists() {
-        eprintln!("\n  ❌ Error: Source path does not exist: {}\n", source.display());
+        eprintln!(
+            "\n  ❌ Error: Source path does not exist: {}\n",
+            source.display()
+        );
         std::process::exit(1);
     }
 
@@ -383,10 +395,11 @@ fn main() -> Result<()> {
     let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
     let no_progress = matches.get_flag("no-progress");
+    let no_report_errors = matches.get_flag("no-report-errors");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
     let no_smart = matches.get_flag("no-smart");
-    let _smart_mode = !no_smart;  // Smart mode is now default (unused but kept for clarity)
+    let _smart_mode = !no_smart; // Smart mode is now default (unused but kept for clarity)
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
     let _has_forced_strategy = forced_strategy.is_some();
 
@@ -394,14 +407,16 @@ fn main() -> Result<()> {
     let links = matches.get_flag("links");
     let deref = matches.get_flag("deref");
     let no_links = matches.get_flag("no-links");
-    
+
     // Validate symlink options - only one can be specified
     let symlink_count = [links, deref, no_links].iter().filter(|&&x| x).count();
     if symlink_count > 1 {
-        eprintln!("\n  ❌ Error: Only one symlink option can be specified: --links, --deref, or --no-links\n");
+        eprintln!(
+            "\n  ❌ Error: Only one symlink option can be specified: --links, --deref, or --no-links\n"
+        );
         std::process::exit(1);
     }
-    
+
     // Determine symlink behavior (default is links)
     let symlink_behavior = if deref {
         SymlinkBehavior::Dereference
@@ -445,11 +460,15 @@ fn main() -> Result<()> {
     let max_size = matches.get_one::<u64>("max-size").copied();
 
     // Copy flags
-    let copy_flags = matches.get_one::<String>("copy-flags").unwrap();
+    let copy_flags = matches
+        .get_one::<String>("copy-flags")
+        .expect("copy-flags has a default value");
     let copy_all = matches.get_flag("copy-all");
 
     // Performance
-    let num_cpus = std::thread::available_parallelism().unwrap().get();
+    let num_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
     let threads = matches
         .get_one::<usize>("threads")
         .copied()
@@ -462,8 +481,12 @@ fn main() -> Result<()> {
     // Validate thread count based on OS limits
     let max_threads = get_max_thread_count();
     if threads > max_threads {
-        eprintln!("\n  ❌ Error: Maximum thread count is {} to avoid system file handle limits.", max_threads);
-        eprintln!("     Requested: {}, Maximum allowed: {}\n", threads, max_threads);
+        eprintln!(
+            "\n  ❌ Error: Maximum thread count is {max_threads} to avoid system file handle limits."
+        );
+        eprintln!(
+            "     Requested: {threads}, Maximum allowed: {max_threads}\n"
+        );
         std::process::exit(1);
     }
 
@@ -476,16 +499,17 @@ fn main() -> Result<()> {
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
     // Print header without lines
-    println!("     {} v{}: {}", 
-        "RoboSync".color_bold_if(Color::Cyan), 
-        env!("CARGO_PKG_VERSION").color_if(Color::White), 
-        "Fast parallel file synchronization".color_if(Color::White));
-    
+    println!(
+        "     {} v{}: {}",
+        "RoboSync".color_bold_if(Color::Cyan),
+        env!("CARGO_PKG_VERSION").color_if(Color::White),
+        "Fast parallel file synchronization".color_if(Color::White)
+    );
+
     // Calculate the max width needed for all content
     let source_str = source.display().to_string();
     let dest_str = destination.display().to_string();
-    
-    
+
     // Build options string
     let mut all_options = Vec::new();
     if mirror {
@@ -514,39 +538,49 @@ fn main() -> Result<()> {
         all_options.push(format!("-{}", "v".repeat(verbose as usize)));
     }
     if threads != num_cpus {
-        all_options.push(format!("--mt {}", threads));
+        all_options.push(format!("--mt {threads}"));
     }
     if retry_count > 0 {
-        all_options.push(format!("-r {} -w {}", retry_count, retry_wait));
+        all_options.push(format!("-r {retry_count} -w {retry_wait}"));
     }
     if copy_all || archive {
         all_options.push("--copyall".to_string());
     } else if copy_flags != "DAT" {
-        all_options.push(format!("--copy {}", copy_flags));
+        all_options.push(format!("--copy {copy_flags}"));
     }
-    
+
     // Add exclude patterns to options
     for excl in &exclude_files {
-        all_options.push(format!("--xf {}", excl));
+        all_options.push(format!("--xf {excl}"));
     }
     for excl in &exclude_dirs {
-        all_options.push(format!("--xd {}", excl));
+        all_options.push(format!("--xd {excl}"));
     }
-    
+
     let options_str = all_options.join(" ");
-    
+
     // Find max width needed
-    let max_len = source_str.len()
-        .max(dest_str.len())
-        .max(options_str.len());
+    let max_len = source_str.len().max(dest_str.len()).max(options_str.len());
     let _table_width = max_len.max(44) + 2; // At least 44 chars, plus padding
-    
+
     // Display configuration
     println!();
-    println!("     {}  {}", "Source:".color_if(Color::White), source_str.as_str().color_if(Color::Green));
-    println!("     {}    {}", "Dest:".color_if(Color::White), dest_str.as_str().color_if(Color::Yellow));
+    println!(
+        "     {}  {}",
+        "Source:".color_if(Color::White),
+        source_str.as_str().color_if(Color::Green)
+    );
+    println!(
+        "     {}    {}",
+        "Dest:".color_if(Color::White),
+        dest_str.as_str().color_if(Color::Yellow)
+    );
     if !options_str.is_empty() {
-        println!("     {} {}", "Options:".color_if(Color::White), options_str.as_str().color_if(Color::DarkGrey));
+        println!(
+            "     {} {}",
+            "Options:".color_if(Color::White),
+            options_str.as_str().color_if(Color::DarkGrey)
+        );
     }
 
     // Warn about dangerous combinations
@@ -591,6 +625,7 @@ fn main() -> Result<()> {
         linux_optimized,
         forced_strategy,
         symlink_behavior,
+        no_report_errors,
     };
 
     if !dry_run {
@@ -604,14 +639,16 @@ fn main() -> Result<()> {
             };
 
             let syncer = ParallelSyncer::new(config);
-            println!("     Diagnostic mode: using {} strategy", sync_options.forced_strategy.as_ref().unwrap());
+            if let Some(ref strategy) = sync_options.forced_strategy {
+                println!("     Diagnostic mode: using {strategy} strategy");
+            }
             let _stats = syncer.synchronize_smart(source, destination, sync_options)?;
         } else {
             // Default: mixed mode (optimal for all scenarios)
             // Force mixed mode in sync options and use smart mode infrastructure
             let mut mixed_options = sync_options.clone();
             mixed_options.forced_strategy = Some("mixed".to_string());
-            
+
             let config = ParallelSyncConfig {
                 worker_threads: threads,
                 io_threads: threads,
@@ -630,7 +667,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,20 +678,17 @@ mod tests {
         // Should return a reasonable number
         assert!(
             max_threads >= 16,
-            "Max threads should be at least 16, got {}",
-            max_threads
+            "Max threads should be at least 16, got {max_threads}"
         );
         assert!(
             max_threads <= 512,
-            "Max threads should be at most 512, got {}",
-            max_threads
+            "Max threads should be at most 512, got {max_threads}"
         );
 
         // Should be a power-friendly number for efficiency
         assert!(
             max_threads % 8 == 0 || max_threads == 64 || max_threads == 128 || max_threads == 256,
-            "Max threads {} should be divisible by 8 or a common power",
-            max_threads
+            "Max threads {max_threads} should be divisible by 8 or a common power"
         );
     }
 

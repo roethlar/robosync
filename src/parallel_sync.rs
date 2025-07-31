@@ -7,45 +7,44 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::algorithm::{BlockChecksum, DeltaAlgorithm, Match};
-use crate::compression::{decompress_data, CompressionType};
+use crate::compression::{CompressionType, decompress_data};
+use crate::fast_file_list::{FastEnumConfig, FastFileListGenerator, compare_file_lists_fast};
 use crate::file_list::{
-    compare_file_lists_with_roots, compare_file_lists_with_roots_and_progress,
-    generate_file_list_with_options, generate_file_list_with_options_and_progress, FileInfo,
-    FileOperation,
+    FileInfo, FileOperation, compare_file_lists_with_roots,
+    compare_file_lists_with_roots_and_progress, generate_file_list_with_options,
+    generate_file_list_with_options_and_progress,
 };
-use crate::fast_file_list::{FastFileListGenerator, FastEnumConfig, compare_file_lists_fast};
 // Pattern export functionality moved to separate shimmer project
+use crate::color_output::ConditionalColor;
 #[cfg(target_os = "linux")]
 use crate::file_list::generate_file_list_parallel;
+#[cfg(target_os = "linux")]
+use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::logging::SyncLogger;
-use crate::metadata::{copy_file_with_metadata, copy_file_with_metadata_with_warnings, CopyFlags};
+use crate::metadata::{CopyFlags, copy_file_with_metadata_with_warnings};
+use crate::mixed_strategy::MixedStrategyExecutor;
 use crate::native_tools::NativeToolExecutor;
 use crate::options::SyncOptions;
 use crate::platform_api::PlatformCopier;
 use crate::progress::SyncProgress;
-use crate::retry::{with_retry, RetryConfig};
-#[cfg(target_os = "linux")]
-use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
-use crate::mixed_strategy::MixedStrategyExecutor;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use crate::color_output::ConditionalColor;
 use crossterm::style::Color;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 /// Format number with thousands separator
 fn format_number(n: u64) -> String {
     let s = n.to_string();
     let chars: Vec<char> = s.chars().collect();
     let mut result = String::new();
-    
+
     for (i, &ch) in chars.iter().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(ch);
     }
-    
+
     result.chars().rev().collect()
 }
 
@@ -71,18 +70,18 @@ pub struct ParallelSyncConfig {
     /// Number of worker threads for file processing
     pub worker_threads: usize,
     /// Number of I/O threads for reading/writing
-    #[allow(dead_code)]
     pub io_threads: usize,
     /// Block size for delta algorithm
     pub block_size: usize,
     /// Maximum number of files to process in parallel
-    #[allow(dead_code)]
     pub max_parallel_files: usize,
 }
 
 impl Default for ParallelSyncConfig {
     fn default() -> Self {
-        let num_cpus = std::thread::available_parallelism().unwrap().get();
+        let num_cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
         Self {
             worker_threads: num_cpus,
             io_threads: std::cmp::min(4, num_cpus),
@@ -102,6 +101,76 @@ impl ParallelSyncer {
         Self { config }
     }
 
+    /// Helper function to create progress style with fallback
+    fn create_progress_style(template: &str, tick_chars: &str) -> ProgressStyle {
+        ProgressStyle::default_spinner()
+            .template(template)
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
+            .tick_chars(tick_chars)
+    }
+
+    /// Ask user for confirmation before proceeding with operations
+    fn confirm_operations(&self, operations: &[FileOperation]) -> Result<bool> {
+        use std::io::{self, Write};
+
+        // Count operation types for summary
+        let mut new_files = 0;
+        let mut new_dirs = 0;
+        let mut updates = 0;
+        let mut deletions = 0;
+        let mut symlinks = 0;
+
+        for op in operations {
+            match op {
+                FileOperation::Create { path } => {
+                    if std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+                        new_dirs += 1;
+                    } else {
+                        new_files += 1;
+                    }
+                }
+                FileOperation::CreateDirectory { .. } => new_dirs += 1,
+                FileOperation::Update { .. } => updates += 1,
+                FileOperation::Delete { .. } => deletions += 1,
+                FileOperation::CreateSymlink { .. } | FileOperation::UpdateSymlink { .. } => {
+                    symlinks += 1
+                }
+            }
+        }
+
+        // Show summary
+        println!("\n     Pending Operation Summary:");
+        if new_files > 0 {
+            println!("       New Files: {new_files}");
+        }
+        if new_dirs > 0 {
+            println!("       New Directories: {new_dirs}");
+        }
+        if updates > 0 {
+            println!("       Updates: {updates}");
+        }
+        if deletions > 0 {
+            println!("       Deletions: {deletions}");
+        }
+        if symlinks > 0 {
+            println!("       Symlinks: {symlinks}");
+        }
+        println!();
+
+        // Ask for confirmation
+        print!("     Continue? Y/n: ");
+        if let Err(e) = io::stdout().flush() {
+            return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
+        }
+        let mut input = String::new();
+        if let Err(e) = io::stdin().read_line(&mut input) {
+            return Err(anyhow::anyhow!("Failed to read user input: {}", e));
+        }
+        let input = input.trim().to_lowercase();
+
+        Ok(input == "y" || input == "yes" || input.is_empty())
+    }
+
     /// Execute mixed mode directly without file analysis
     fn execute_mixed_mode_direct(
         &self,
@@ -110,11 +179,21 @@ impl ParallelSyncer {
         options: SyncOptions,
     ) -> Result<SyncStats> {
         // Go straight to mixed mode execution
-        let operations = self.collect_operations(&source, &destination, &options)?;
-        
+        // Show spinners during scanning, they'll be cleared before mixed strategy progress bar
+        let operations =
+            self.collect_operations_with_progress(&source, &destination, &options, true)?;
+
+        // Check if confirmation is needed
+        if options.confirm && !operations.is_empty()
+            && !self.confirm_operations(&operations)? {
+                println!("     Operation cancelled by user.");
+                return Ok(SyncStats::default());
+            }
+
         // We need file count for the executor, but we can get it from operations
         let total_files = operations.len() as u64;
-        let total_bytes = operations.iter()
+        let total_bytes = operations
+            .iter()
             .map(|op| match op {
                 FileOperation::Create { path } | FileOperation::Update { path, .. } => {
                     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
@@ -126,7 +205,7 @@ impl ParallelSyncer {
         let executor = MixedStrategyExecutor::new(total_files, total_bytes);
         executor.execute(operations, &source, &destination, &options)
     }
-    
+
     /// Synchronize using intelligent strategy selection
     pub fn synchronize_smart(
         &self,
@@ -134,24 +213,33 @@ impl ParallelSyncer {
         destination: PathBuf,
         options: SyncOptions,
     ) -> Result<SyncStats> {
-        // Check if we're forcing mixed mode (default behavior)
+        // Mixed mode is the default - only do analysis if specific strategy is forced
         if let Some(ref forced) = options.forced_strategy {
-            if forced == "mixed" {
-                // Skip analysis and go straight to mixed mode
-                return self.execute_mixed_mode_direct(source, destination, options);
+            if forced != "mixed" {
+                // User specified a specific strategy - go through analysis
+                return self.synchronize_with_analysis(source, destination, options);
             }
         }
 
+        // Default behavior: go straight to mixed mode (fastest path)
+        self.execute_mixed_mode_direct(source, destination, options)
+    }
+
+    /// Synchronize with strategy analysis (for forced strategies other than mixed)
+    fn synchronize_with_analysis(
+        &self,
+        source: PathBuf,
+        destination: PathBuf,
+        options: SyncOptions,
+    ) -> Result<SyncStats> {
         // Create a spinner for file analysis (only for diagnostic modes)
         let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("  {spinner} RoboSync Diagnostic Mode: Analyzing files for strategy selection...")
-                .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-        );
+        spinner.set_style(Self::create_progress_style(
+            "  {spinner} RoboSync Diagnostic Mode: Analyzing files for strategy selection...",
+            "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+        ));
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        
+
         // Analyze the files to determine the best strategy (diagnostic modes only)
         let source_files = if source.is_dir() {
             #[cfg(target_os = "linux")]
@@ -175,16 +263,20 @@ impl ParallelSyncer {
                 checksum: None,
             }]
         };
-        
+
         // Calculate statistics
         let file_stats = FileStats::from_operations(&source_files);
-        
+
         // Stop the spinner
-        spinner.finish_and_clear();
-        
-        println!("\n     {}", "File Analysis Complete:".color_bold_if(Color::Cyan));
+        spinner.finish_with_message("     ✅ Analysis complete".to_string());
+
+        println!(
+            "\n     {}",
+            "File Analysis Complete:".color_bold_if(Color::Cyan)
+        );
         println!();
-        println!("     {}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+        println!(
+            "     {}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
             "Files:".color_if(Color::White),
             format_number(file_stats.total_files as u64).color_bold_if(Color::White),
             "total".color_if(Color::White),
@@ -200,14 +292,15 @@ impl ParallelSyncer {
         } else {
             "0 B".to_string()
         };
-        println!("     {}   {:>8} {}   ({} {})",
+        println!(
+            "     {}   {:>8} {}   ({} {})",
             "Size:".color_if(Color::White),
             humanize_bytes(file_stats.total_size).color_bold_if(Color::White),
             "total".color_if(Color::White),
             "average:".color_if(Color::DarkGrey),
             avg_size_str.as_str().color_if(Color::White)
         );
-        
+
         // Choose strategy using intelligent heuristics
         let strategy = if let Some(ref forced) = options.forced_strategy {
             // Check if user forced a specific strategy
@@ -244,9 +337,7 @@ impl ParallelSyncer {
                 #[cfg(target_os = "linux")]
                 "io_uring" => {
                     println!("     Using forced strategy: io_uring");
-                    CopyStrategy::IoUringBatch {
-                        batch_size: 256,
-                    }
+                    CopyStrategy::IoUringBatch { batch_size: 256 }
                 }
                 "mixed" => {
                     println!("     Using forced strategy: mixed mode");
@@ -257,22 +348,26 @@ impl ParallelSyncer {
                     CopyStrategy::MixedMode
                 }
                 _ => {
-                    eprintln!("Unknown strategy '{}', using automatic selection", forced);
+                    eprintln!("Unknown strategy '{forced}', using automatic selection");
                     selector.choose_strategy(&file_stats, &source, &destination, &options)
                 }
             }
         } else {
             let selector = StrategySelector::new();
             let chosen = selector.choose_strategy(&file_stats, &source, &destination, &options);
-            println!("     {} {}", 
-                "Automatically selected strategy:".color_if(Color::White), 
-                selector.describe_strategy(&chosen).color_bold_if(Color::Cyan));
+            println!(
+                "     {} {}",
+                "Automatically selected strategy:".color_if(Color::White),
+                selector
+                    .describe_strategy(&chosen)
+                    .color_bold_if(Color::Cyan)
+            );
             chosen
         };
-        
+
         // Clone strategy for later use in pattern recording
         let _strategy_for_recording = strategy.clone();
-        
+
         // Create unified progress manager (but not for mixed modes which have their own)
         let use_mixed_mode = matches!(strategy, CopyStrategy::MixedMode);
         let progress_manager = if options.no_progress || use_mixed_mode {
@@ -283,33 +378,29 @@ impl ParallelSyncer {
                 file_stats.total_size,
             )))
         };
-        
+
         // Execute based on strategy
         let result = match strategy {
             CopyStrategy::NativeRsync { extra_args } => {
                 println!("Delegating to rsync for optimal small file performance...");
-                let executor = NativeToolExecutor::new(options.dry_run);
-                
+
                 #[cfg(unix)]
                 {
-                    executor.run_rsync(
-                        &source,
-                        &destination,
-                        extra_args,
-                        progress_manager.clone(),
-                    )
+                    let executor = NativeToolExecutor::new(options.dry_run);
+                    executor.run_rsync(&source, &destination, extra_args, progress_manager.clone())
                 }
                 #[cfg(not(unix))]
                 {
+                    let _ = extra_args; // Unused on non-Unix
                     // Fall back to our implementation on non-Unix
                     self.synchronize_with_options(source, destination, options)
                 }
             }
-            
-            CopyStrategy::NativeRobocopy { extra_args: _ } => {
+
+            CopyStrategy::NativeRobocopy { extra_args } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
-                let _executor = NativeToolExecutor::new(options.dry_run);
-                
+                let executor = NativeToolExecutor::new(options.dry_run);
+
                 #[cfg(target_os = "windows")]
                 {
                     executor.run_robocopy(
@@ -325,65 +416,69 @@ impl ParallelSyncer {
                     self.synchronize_with_options(source, destination, options)
                 }
             }
-            
+
             CopyStrategy::PlatformApi { method: _ } => {
                 println!("Using platform-specific APIs for optimal performance...");
                 let mut copier = PlatformCopier::new();
-                
+
                 // Add progress tracking if available
                 if let Some(ref pm) = progress_manager {
                     copier = copier.with_progress(Arc::clone(pm).create_tracker());
                 }
-                
+
                 // Collect file operations
                 let operations = self.collect_operations(&source, &destination, &options)?;
                 let file_pairs: Vec<(PathBuf, PathBuf)> = operations
                     .into_iter()
                     .filter_map(|op| match op {
-                        FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                            self.map_source_to_dest(&path, &source, &destination)
-                                .ok()
-                                .map(|dest| (path, dest))
-                        }
+                        FileOperation::Create { path } | FileOperation::Update { path, .. } => self
+                            .map_source_to_dest(&path, &source, &destination)
+                            .ok()
+                            .map(|dest| (path, dest)),
                         _ => None,
                     })
                     .collect();
-                
+
                 copier.copy_files(&file_pairs)
             }
-            
+
             CopyStrategy::DeltaTransfer { block_size } => {
-                println!("Using delta transfer algorithm with {}KB blocks...", block_size / 1024);
+                println!(
+                    "Using delta transfer algorithm with {}KB blocks...",
+                    block_size / 1024
+                );
                 // Use our existing implementation with delta transfer enabled
                 let mut opts = options.clone();
                 opts.checksum = true; // Force checksum mode for delta
                 self.synchronize_with_options(source, destination, opts)
             }
-            
+
             CopyStrategy::ParallelCustom { threads } => {
-                println!("Using parallel transfer with {} threads...", threads);
+                println!("Using parallel transfer with {threads} threads...");
                 // Use our existing parallel implementation
                 let mut config = self.config.clone();
                 config.worker_threads = threads;
                 let syncer = ParallelSyncer::new(config);
                 syncer.synchronize_with_options(source, destination, options)
             }
-            
+
             #[cfg(target_os = "linux")]
             CopyStrategy::IoUringBatch { batch_size } => {
-                println!("Using io_uring batch mode with batch size {}...", batch_size);
+                println!(
+                    "Using io_uring batch mode with batch size {batch_size}..."
+                );
                 // Use our Linux optimized path
                 let mut opts = options.clone();
                 opts.linux_optimized = true;
                 self.synchronize_with_options(source, destination, opts)
             }
-            
+
             CopyStrategy::MixedMode => {
                 // Using mixed mode strategy
-                
+
                 // Collect all operations
                 let operations = self.collect_operations(&source, &destination, &options)?;
-                
+
                 // Execute mixed strategy with simple progress
                 let executor = MixedStrategyExecutor::new(
                     file_stats.total_files as u64,
@@ -391,19 +486,18 @@ impl ParallelSyncer {
                 );
                 executor.execute(operations, &source, &destination, &options)
             }
-            
         };
-        
+
         // Finish progress tracking
         if let Some(pm) = progress_manager {
             pm.finish();
         }
-        
+
         // Pattern learning functionality moved to separate shimmer project
-        
+
         result
     }
-    
+
     /// Helper to collect file operations
     fn collect_operations(
         &self,
@@ -411,38 +505,124 @@ impl ParallelSyncer {
         destination: &Path,
         options: &SyncOptions,
     ) -> Result<Vec<FileOperation>> {
+        self.collect_operations_with_progress(source, destination, options, true)
+    }
+
+    /// Helper to collect file operations with optional progress indicators
+    fn collect_operations_with_progress(
+        &self,
+        source: &Path,
+        destination: &Path,
+        options: &SyncOptions,
+        show_progress: bool,
+    ) -> Result<Vec<FileOperation>> {
         // Starting fast file enumeration
-        
+
         // Create fast enumeration configuration
         let enum_config = FastEnumConfig {
             scan_threads: self.config.worker_threads * 2, // More threads for I/O bound scanning
-            batch_size: 5000, // Larger batch for better performance
+            batch_size: 5000,                             // Larger batch for better performance
             pre_scan: true,
             progress_interval: 2000, // Update every 2000 files
         };
-        
+
         let generator = FastFileListGenerator::new(enum_config);
-        
-        // Enumerating source files
-        let source_files = generator.generate_file_list(source, options)?;
-        
-        let dest_files = if destination.exists() {
-            // Enumerating destination files
-            generator.generate_file_list(destination, options)?
+
+        // Create MultiProgress to manage multiple spinners properly
+        let multi_progress = if show_progress && !options.no_progress {
+            Some(MultiProgress::new())
         } else {
+            None
+        };
+
+        // Show progress during source enumeration
+        let source_files = if let Some(ref mp) = multi_progress {
+            let source_pb = mp.add(ProgressBar::new_spinner());
+            source_pb.set_style(Self::create_progress_style(
+                "   {spinner:.green} Scanning source directory...",
+                "⠁⠂⠄⡀⢀⠠⠐⠈",
+            ));
+            source_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            // Enumerating source files
+            let files = generator.generate_file_list(source, options)?;
+            source_pb.finish_with_message(format!("     ✅ Found {} source files", files.len()));
+
+            // Print newline to separate spinners
+            let _ = mp.println("");
+
+            files
+        } else {
+            generator.generate_file_list(source, options)?
+        };
+
+        let dest_files = if destination.exists() {
+            if let Some(ref mp) = multi_progress {
+                // Show progress during destination enumeration
+                let dest_pb = mp.add(ProgressBar::new_spinner());
+                dest_pb.set_style(Self::create_progress_style(
+                    "   {spinner:.yellow} Scanning destination directory...",
+                    "⠁⠂⠄⡀⢀⠠⠐⠈",
+                ));
+                dest_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+                // Enumerating destination files
+                let files = generator.generate_file_list(destination, options)?;
+                dest_pb.finish_with_message(format!(
+                    "     ✅ Found {} destination files",
+                    files.len()
+                ));
+                files
+            } else {
+                generator.generate_file_list(destination, options)?
+            }
+        } else {
+            if let Some(ref mp) = multi_progress {
+                let _ = mp.println("     📁 Destination directory doesn't exist - will be created");
+            } else if show_progress {
+                println!("     📁 Destination directory doesn't exist - will be created");
+            }
             Vec::new()
         };
-        
-        // Comparing file lists
-        let operations = compare_file_lists_fast(
-            &source_files,
-            &dest_files,
-            source,
-            destination,
-            options,
-            None, // No progress for now since this is fast
-        );
-        
+
+        // Show progress during comparison
+        let operations = if let Some(ref mp) = multi_progress {
+            let compare_pb = mp.add(ProgressBar::new_spinner());
+            compare_pb.set_style(Self::create_progress_style(
+                "   {spinner:.blue} Analyzing differences...",
+                "⠁⠂⠄⡀⢀⠠⠐⠈",
+            ));
+            compare_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            // Comparing file lists
+            let ops = compare_file_lists_fast(
+                &source_files,
+                &dest_files,
+                source,
+                destination,
+                options,
+                None, // No progress for now since this is fast
+            );
+
+            compare_pb.finish_with_message(format!("     ✅ Generated {} operations", ops.len()));
+            ops
+        } else {
+            compare_file_lists_fast(
+                &source_files,
+                &dest_files,
+                source,
+                destination,
+                options,
+                None,
+            )
+        };
+
+        // Clear MultiProgress to ensure clean output
+        if let Some(_mp) = multi_progress {
+            // Don't clear, just ensure all spinners are finished
+            // mp.clear().ok();
+        }
+
         // Generated operations
         Ok(operations)
     }
@@ -476,17 +656,24 @@ impl ParallelSyncer {
         #[cfg(windows)]
         {
             use std::time::Duration;
-            
+
             // Check if destination might be a network location
-            let is_network = destination.to_str().map(|s| s.starts_with("\\\\")).unwrap_or(false);
-            let is_mapped_drive = destination.to_str()
-                .and_then(|s| s.chars().next())
-                .map(|c| c.is_ascii_alphabetic() && destination.to_str().unwrap().chars().nth(1) == Some(':'))
+            let is_network = destination
+                .to_str()
+                .map(|s| s.starts_with("\\\\"))
                 .unwrap_or(false);
-            
+            let is_mapped_drive = destination
+                .to_str()
+                .and_then(|s| {
+                    let first_char = s.chars().next()?;
+                    let second_char = s.chars().nth(1)?;
+                    Some(first_char.is_ascii_alphabetic() && second_char == ':')
+                })
+                .unwrap_or(false);
+
             if is_network || is_mapped_drive {
                 println!("Testing network connection to destination...");
-                
+
                 // Try to create a test file to establish connection and verify write access
                 let test_file = destination.join(".robosync_test");
                 match std::fs::write(&test_file, b"test") {
@@ -496,13 +683,13 @@ impl ParallelSyncer {
                     }
                     Err(e) => {
                         // If we can't write, at least try to read to establish connection
-                        println!("Warning: Could not write test file: {}", e);
+                        println!("Warning: Could not write test file: {e}");
                         println!("Attempting to establish read connection...");
-                        
+
                         // Try with timeout
                         let start = std::time::Instant::now();
                         let timeout = Duration::from_secs(30);
-                        
+
                         while start.elapsed() < timeout {
                             if fs::metadata(&destination).is_ok() {
                                 println!("Read connection established.");
@@ -510,7 +697,7 @@ impl ParallelSyncer {
                             }
                             std::thread::sleep(Duration::from_millis(100));
                         }
-                        
+
                         if start.elapsed() >= timeout {
                             eprintln!("Warning: Network connection is slow or unresponsive");
                         }
@@ -552,7 +739,7 @@ impl ParallelSyncer {
 
         let stats = self.sync_file_pair(source, &dest_path, options)?;
         logger.update_progress(1, stats.bytes_transferred());
-        
+
         // Use formatted display for completion
         let elapsed = start_time.elapsed();
         let throughput = if elapsed.as_secs() > 0 {
@@ -560,8 +747,9 @@ impl ParallelSyncer {
         } else {
             stats.bytes_transferred()
         };
-        
-        println!("\n     ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
+
+        println!(
+            "\n     ✅ Completed in {:.1}s: {} files, {} transferred ({}/s)",
             elapsed.as_secs_f32(),
             format_number(stats.files_copied()),
             humanize_bytes(stats.bytes_transferred()),
@@ -579,7 +767,7 @@ impl ParallelSyncer {
         options: &SyncOptions,
     ) -> Result<SyncStats> {
         let start_time = Instant::now();
-        
+
         // Create logger and multi-progress for this sync operation
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
 
@@ -594,11 +782,10 @@ impl ParallelSyncer {
         // Scan source directory with progress
         let source_files = if let Some(ref mp) = multi_progress {
             let source_pb = mp.add(ProgressBar::new_spinner());
-            source_pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} Scanning source: {pos} files found...")
-                    .unwrap(),
-            );
+            source_pb.set_style(Self::create_progress_style(
+                "{spinner:.green} Scanning source: {pos} files found...",
+                "⠁⠂⠄⡀⢀⠠⠐⠈",
+            ));
             source_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
             let source_files = generate_file_list_with_options_and_progress(
@@ -610,7 +797,10 @@ impl ParallelSyncer {
             )
             .context("Failed to generate source file list")?;
 
-            source_pb.finish_with_message(format!("Found {} items in source", source_files.len()));
+            source_pb.finish_with_message(format!(
+                "     ✅ Found {} items in source",
+                source_files.len()
+            ));
             source_files
         } else {
             logger.log("Scanning source directory...");
@@ -634,11 +824,10 @@ impl ParallelSyncer {
         let dest_files = if destination.exists() {
             let dest_files = if let Some(ref mp) = multi_progress {
                 let dest_pb = mp.add(ProgressBar::new_spinner());
-                dest_pb.set_style(
-                    ProgressStyle::default_spinner()
-                        .template("{spinner:.green} Scanning destination: {pos} files found...")
-                        .unwrap(),
-                );
+                dest_pb.set_style(Self::create_progress_style(
+                    "{spinner:.green} Scanning destination: {pos} files found...",
+                    "⠁⠂⠄⡀⢀⠠⠐⠈",
+                ));
                 dest_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
                 let files = generate_file_list_with_options_and_progress(
@@ -650,7 +839,10 @@ impl ParallelSyncer {
                 )
                 .context("Failed to generate destination file list")?;
 
-                dest_pb.finish_with_message(format!("Found {} items in destination", files.len()));
+                dest_pb.finish_with_message(format!(
+                    "     ✅ Found {} items in destination",
+                    files.len()
+                ));
                 files
             } else {
                 logger.log("Scanning destination directory...");
@@ -676,8 +868,7 @@ impl ParallelSyncer {
             files
         } else {
             if let Some(ref mp) = multi_progress {
-                mp.println("Destination does not exist, will create")
-                    .unwrap();
+                let _ = mp.println("Destination does not exist, will create");
             } else {
                 logger.log("Destination does not exist, will create");
             }
@@ -688,11 +879,10 @@ impl ParallelSyncer {
         let mut operations = if !options.no_progress {
             // Create a spinner to show analysis activity
             let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} Analyzing changes... {pos} files processed")
-                    .unwrap(),
-            );
+            pb.set_style(Self::create_progress_style(
+                "{spinner:.green} Analyzing changes... {pos} files processed",
+                "⠁⠂⠄⡀⢀⠠⠐⠈",
+            ));
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
             let operations = compare_file_lists_with_roots_and_progress(
@@ -705,7 +895,7 @@ impl ParallelSyncer {
                     pb.set_position(count as u64);
                 }),
             );
-            pb.finish_with_message("Analysis complete");
+            pb.finish_with_message("     ✅ Analysis complete".to_string());
             operations
         } else {
             logger.log("Analyzing changes...");
@@ -728,11 +918,10 @@ impl ParallelSyncer {
                 } else {
                     ProgressBar::new_spinner()
                 };
-                pb.set_style(
-                    ProgressStyle::default_spinner()
-                        .template("{spinner:.green} Finding files to purge...")
-                        .unwrap(),
-                );
+                pb.set_style(Self::create_progress_style(
+                    "{spinner:.green} Finding files to purge...",
+                    "⠁⠂⠄⡀⢀⠠⠐⠈",
+                ));
                 pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
                 let purge_ops = self.find_purge_operations_with_progress(
@@ -748,7 +937,7 @@ impl ParallelSyncer {
                 operations.extend(purge_ops);
 
                 pb.finish_with_message(format!(
-                    "Purge analysis complete - {purge_count} files to remove"
+                    "     ✅ Purge analysis complete - {purge_count} files to remove"
                 ));
             } else {
                 logger.log("Finding files to purge...");
@@ -1012,9 +1201,13 @@ impl ParallelSyncer {
 
             // Ask for confirmation
             print!("Continue? Y/n: ");
-            io::stdout().flush().unwrap();
+            if let Err(e) = io::stdout().flush() {
+                return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
+            }
             let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap();
+            if let Err(e) = io::stdin().read_line(&mut input) {
+                return Err(anyhow::anyhow!("Failed to read user input: {}", e));
+            }
             let input = input.trim().to_lowercase();
 
             if input != "y" && input != "yes" && !input.is_empty() {
@@ -1033,7 +1226,7 @@ impl ParallelSyncer {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} files ({per_sec}, {eta}) {msg}")
-                        .unwrap()
+                        .unwrap_or_else(|_| ProgressStyle::default_bar())
                         .progress_chars("#>-"),
                 );
                 pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -1053,18 +1246,24 @@ impl ParallelSyncer {
 
         // Set up Rayon thread pool for parallel processing
         // For network drives, use more threads to hide latency
-        let effective_threads = if destination.to_str().map(|s| s.starts_with("\\\\") || s.contains(":")).unwrap_or(false) {
-            self.config.worker_threads * 2  // Double threads for network operations
+        let effective_threads = if destination
+            .to_str()
+            .map(|s| s.starts_with("\\\\") || s.contains(":"))
+            .unwrap_or(false)
+        {
+            self.config.worker_threads * 2 // Double threads for network operations
         } else {
             self.config.worker_threads
         };
-        
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(effective_threads)
             .build()
             .context("Failed to create thread pool")?;
-            
-        println!("DEBUG: Using {} threads for parallel operations", effective_threads);
+
+        println!(
+            "DEBUG: Using {effective_threads} threads for parallel operations"
+        );
 
         // Separate operations by type for optimal ordering
         let (dir_ops, file_ops): (Vec<_>, Vec<_>) = operations
@@ -1083,7 +1282,14 @@ impl ParallelSyncer {
                 logger.log(&format!("Creating {} directories...", dir_ops.len()));
             }
             for operation in dir_ops {
-                self.execute_operation(operation, source, destination, &stats, options, &mut logger)?;
+                self.execute_operation(
+                    operation,
+                    source,
+                    destination,
+                    &stats,
+                    options,
+                    &mut logger,
+                )?;
                 logger.update_progress(1, 0);
                 if let Some(ref progress) = progress {
                     if let Ok(mut p) = progress.lock() {
@@ -1094,22 +1300,39 @@ impl ParallelSyncer {
         }
 
         // Batch small files for efficient processing
-        println!("DEBUG: Starting file categorization of {} operations", file_ops.len());
+        println!(
+            "DEBUG: Starting file categorization of {} operations",
+            file_ops.len()
+        );
         let (small_files, large_files): (Vec<_>, Vec<_>) = file_ops
             .into_iter()
             .partition(|op| self.is_small_file_operation(op, &source_files));
-        println!("DEBUG: Categorized {} small files, {} large files", small_files.len(), large_files.len());
+        println!(
+            "DEBUG: Categorized {} small files, {} large files",
+            small_files.len(),
+            large_files.len()
+        );
 
         // Log file processing start
         if options.verbose >= 1 {
-            logger.log(&format!("Processing {} small files and {} large files...", 
-                small_files.len(), large_files.len()));
+            logger.log(&format!(
+                "Processing {} small files and {} large files...",
+                small_files.len(),
+                large_files.len()
+            ));
         }
-        
+
         // Additional debug info for network drives
-        if destination.to_str().map(|s| s.starts_with("\\\\") || s.contains(":")).unwrap_or(false) {
-            logger.log(&format!("Note: Destination appears to be a network location. Operations may be slower than local disk."));
-            logger.log(&format!("Using {} threads with batch size of 100 for small files", self.config.worker_threads));
+        if destination
+            .to_str()
+            .map(|s| s.starts_with("\\\\") || s.contains(":"))
+            .unwrap_or(false)
+        {
+            logger.log("Note: Destination appears to be a network location. Operations may be slower than local disk.");
+            logger.log(&format!(
+                "Using {} threads with batch size of 100 for small files",
+                self.config.worker_threads
+            ));
         }
 
         // Process files in parallel - note: logger is not thread-safe for parallel updates
@@ -1121,11 +1344,17 @@ impl ParallelSyncer {
         if !small_files.is_empty() {
             let small_files_count = small_files.len();
             if options.verbose >= 1 {
-                logger_arc.lock().unwrap().log(&format!("Starting parallel processing of {} small files", small_files_count));
+                if let Ok(logger) = logger_arc.lock() {
+                    logger.log(&format!(
+                        "Starting parallel processing of {small_files_count} small files"
+                    ));
+                }
             }
-            
+
             // Pre-create all necessary directories to avoid redundant checks
-            println!("DEBUG: Starting directory pre-creation for {} small files", small_files_count);
+            println!(
+                "DEBUG: Starting directory pre-creation for {small_files_count} small files"
+            );
             let mut dirs_to_create = std::collections::HashSet::new();
             for operation in &small_files {
                 match operation {
@@ -1139,14 +1368,17 @@ impl ParallelSyncer {
                     _ => {}
                 }
             }
-            
+
             // Create all directories at once
-            println!("DEBUG: Creating {} unique directories", dirs_to_create.len());
+            println!(
+                "DEBUG: Creating {} unique directories",
+                dirs_to_create.len()
+            );
             for dir in dirs_to_create {
                 let _ = fs::create_dir_all(dir);
             }
             println!("DEBUG: Directory creation complete, starting parallel file processing");
-            
+
             // Use io_uring batch copy on Linux when optimized mode is enabled
             #[cfg(target_os = "linux")]
             if options.linux_optimized {
@@ -1154,13 +1386,15 @@ impl ParallelSyncer {
                 // Import io_uring directly here to avoid module issues
                 use io_uring::{IoUring, opcode, types};
                 use std::os::unix::io::AsRawFd;
-                
+
                 // Collect source-destination pairs for batch processing
                 let mut file_pairs = Vec::new();
                 for operation in &small_files {
                     match operation {
                         FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                            if let Ok(dest_path) = self.map_source_to_dest(path, source, destination) {
+                            if let Ok(dest_path) =
+                                self.map_source_to_dest(path, source, destination)
+                            {
                                 // Check if it's a regular file (not symlink)
                                 if let Ok(metadata) = fs::symlink_metadata(path) {
                                     if metadata.is_file() && !metadata.file_type().is_symlink() {
@@ -1172,166 +1406,184 @@ impl ParallelSyncer {
                         _ => {}
                     }
                 }
-                
+
                 if !file_pairs.is_empty() {
-                    println!("DEBUG: Using optimized batch copy for {} files", file_pairs.len());
-                    
+                    println!(
+                        "DEBUG: Using optimized batch copy for {} files",
+                        file_pairs.len()
+                    );
+
                     // Use memory-mapped files for now until io_uring is fully working
                     const SMALL_FILE_THRESHOLD: usize = 64 * 1024;
-                    
+
                     let mut total_bytes_copied = 0u64;
-                    
+
                     // Process files in batches
                     for batch in file_pairs.chunks(IO_URING_BATCH_SIZE) {
                         let mut ring = IoUring::builder()
-                            .setup_sqpoll(1000)  // Use kernel polling thread
+                            .setup_sqpoll(1000) // Use kernel polling thread
                             .build(IO_URING_BATCH_SIZE as u32)?;
-                        
+
                         let mut file_handles = Vec::new();
                         let mut buffers: Vec<Vec<u8>> = Vec::new();
-                        
+
                         // Pre-allocate buffers
                         for _ in 0..batch.len() {
                             buffers.push(vec![0u8; SMALL_FILE_THRESHOLD]);
                         }
-                        
+
                         // Open all files and submit read operations
                         for (idx, (src, dst)) in batch.iter().enumerate() {
                             // Open source file
                             let src_file = match fs::File::open(src) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    eprintln!("Failed to open source {:?}: {}", src, e);
+                                    eprintln!("Failed to open source {src:?}: {e}");
                                     continue;
                                 }
                             };
-                            
+
                             let metadata = match src_file.metadata() {
                                 Ok(m) => m,
                                 Err(e) => {
-                                    eprintln!("Failed to get metadata for {:?}: {}", src, e);
+                                    eprintln!("Failed to get metadata for {src:?}: {e}");
                                     continue;
                                 }
                             };
-                            
+
                             let file_size = metadata.len();
                             if file_size > SMALL_FILE_THRESHOLD as u64 {
                                 // Fall back to regular copy for large files
                                 match fs::copy(src, dst) {
                                     Ok(bytes) => total_bytes_copied += bytes,
-                                    Err(e) => eprintln!("Failed to copy large file {:?}: {}", src, e),
+                                    Err(e) => {
+                                        eprintln!("Failed to copy large file {src:?}: {e}")
+                                    }
                                 }
                                 continue;
                             }
-                            
+
                             // Open destination file
                             let dst_file = match fs::File::create(dst) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    eprintln!("Failed to create destination {:?}: {}", dst, e);
+                                    eprintln!("Failed to create destination {dst:?}: {e}");
                                     continue;
                                 }
                             };
-                            
+
                             let src_fd = src_file.as_raw_fd();
                             let dst_fd = dst_file.as_raw_fd();
-                            
+
                             // Get a buffer for this file
                             let buffer_ptr = buffers[idx].as_mut_ptr();
-                            
+
                             // Submit read operation
-                            let read_op = opcode::Read::new(types::Fd(src_fd), buffer_ptr, file_size as u32)
-                                .offset(0)
-                                .build()
-                                .user_data(idx as u64 * 2); // Even numbers for reads
-                                
+                            let read_op =
+                                opcode::Read::new(types::Fd(src_fd), buffer_ptr, file_size as u32)
+                                    .offset(0)
+                                    .build()
+                                    .user_data(idx as u64 * 2); // Even numbers for reads
+
                             unsafe {
                                 ring.submission()
                                     .push(&read_op)
                                     .map_err(|e| anyhow::anyhow!("Failed to submit read: {}", e))?;
                             }
-                            
+
                             use std::os::unix::fs::MetadataExt;
-                            file_handles.push((src_file, dst_file, file_size, dst_fd, buffer_ptr, metadata.mode()));
+                            file_handles.push((
+                                src_file,
+                                dst_file,
+                                file_size,
+                                dst_fd,
+                                buffer_ptr,
+                                metadata.mode(),
+                            ));
                         }
-                        
+
                         if file_handles.is_empty() {
                             continue;
                         }
-                        
+
                         // Submit the batch
                         ring.submit_and_wait(file_handles.len())
                             .map_err(|e| anyhow::anyhow!("Failed to submit batch: {}", e))?;
-                        
+
                         // Process completions and submit writes
                         let mut completed_reads = Vec::new();
                         for _ in 0..file_handles.len() {
-                            let cqe: io_uring::cqueue::Entry = ring.completion().next().expect("completion queue entry");
+                            let cqe: io_uring::cqueue::Entry =
+                                ring.completion().next().expect("completion queue entry");
                             let user_data = cqe.user_data();
                             let idx = (user_data / 2) as usize;
-                            
+
                             if cqe.result() < 0 {
                                 eprintln!("Read failed for file {}: {}", idx, cqe.result());
                                 continue;
                             }
-                            
+
                             completed_reads.push((idx, cqe.result() as u32));
                         }
-                        
+
                         // Count writes to submit
                         let num_writes = completed_reads.len();
-                        
+
                         // Submit write operations for successful reads
                         for (idx, bytes_read) in completed_reads {
                             if let Some((_, _, _, dst_fd, buffer_ptr, _)) = file_handles.get(idx) {
-                                let write_op = opcode::Write::new(types::Fd(*dst_fd), *buffer_ptr, bytes_read)
-                                    .offset(0)
-                                    .build()
-                                    .user_data(idx as u64 * 2 + 1); // Odd numbers for writes
-                                    
+                                let write_op =
+                                    opcode::Write::new(types::Fd(*dst_fd), *buffer_ptr, bytes_read)
+                                        .offset(0)
+                                        .build()
+                                        .user_data(idx as u64 * 2 + 1); // Odd numbers for writes
+
                                 unsafe {
-                                    ring.submission()
-                                        .push(&write_op)
-                                        .map_err(|e| anyhow::anyhow!("Failed to submit write: {}", e))?;
+                                    ring.submission().push(&write_op).map_err(|e| {
+                                        anyhow::anyhow!("Failed to submit write: {}", e)
+                                    })?;
                                 }
                             }
                         }
-                        
+
                         // Submit the writes
                         ring.submit_and_wait(num_writes)
                             .map_err(|e| anyhow::anyhow!("Failed to submit writes: {}", e))?;
-                        
+
                         // Process write completions
                         for _ in 0..num_writes {
-                            let cqe: io_uring::cqueue::Entry = ring.completion().next().expect("completion queue entry");
+                            let cqe: io_uring::cqueue::Entry =
+                                ring.completion().next().expect("completion queue entry");
                             let idx = ((cqe.user_data() - 1) / 2) as usize;
-                            
+
                             if cqe.result() < 0 {
                                 eprintln!("Write failed for file {}: {}", idx, cqe.result());
                                 continue;
                             }
-                            
+
                             total_bytes_copied += cqe.result() as u64;
-                            
+
                             // Set permissions on destination file
                             if let Some((_, dst_file, _, _, _, mode)) = file_handles.get(idx) {
                                 use std::os::unix::fs::PermissionsExt;
-                                let _ = dst_file.set_permissions(std::fs::Permissions::from_mode(*mode));
+                                let _ = dst_file
+                                    .set_permissions(std::fs::Permissions::from_mode(*mode));
                             }
                         }
                     }
-                    
+
                     stats.add_bytes_transferred(total_bytes_copied);
-                    
+
                     // Update progress for all files at once
                     if let Ok(mut log) = logger_arc.lock() {
                         log.update_progress(file_pairs.len() as u64, total_bytes_copied);
                     }
                 }
-                
+
                 // Handle any remaining special files (symlinks, etc) the standard way
-                let special_files: Vec<_> = small_files.into_iter().filter(|op| {
-                    match op {
+                let special_files: Vec<_> = small_files
+                    .into_iter()
+                    .filter(|op| match op {
                         FileOperation::Create { path } | FileOperation::Update { path, .. } => {
                             if let Ok(metadata) = fs::symlink_metadata(path) {
                                 !metadata.is_file() || metadata.file_type().is_symlink()
@@ -1339,10 +1591,10 @@ impl ParallelSyncer {
                                 true
                             }
                         }
-                        _ => true
-                    }
-                }).collect();
-                
+                        _ => true,
+                    })
+                    .collect();
+
                 if !special_files.is_empty() {
                     let verbose = options.verbose;
                     pool.install(|| {
@@ -1351,45 +1603,57 @@ impl ParallelSyncer {
                             .into_par_iter()
                             .try_for_each(|operation| -> Result<()> {
                                 match operation {
-                                    FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                                        let dest_path = self.map_source_to_dest(&path, source, destination)?;
-                                        
+                                    FileOperation::Create { path }
+                                    | FileOperation::Update { path, .. } => {
+                                        let dest_path =
+                                            self.map_source_to_dest(&path, source, destination)?;
+
                                         if let Ok(metadata) = fs::symlink_metadata(&path) {
                                             let file_type = metadata.file_type();
-                                            
+
                                             // Handle symlinks specially
                                             if file_type.is_symlink() {
                                                 if verbose >= 1 {
-                                                    println!("Handling symlink: {}", path.display());
+                                                    println!(
+                                                        "Handling symlink: {}",
+                                                        path.display()
+                                                    );
                                                 }
-                                                
+
                                                 // Copy the symlink itself, not what it points to
-                                                if let Ok(target) = fs::read_link(&path) {
+                                                if let Ok(_target) = fs::read_link(&path) {
                                                     // Remove destination if it exists
                                                     let _ = fs::remove_file(&dest_path);
-                                                    
+
                                                     #[cfg(unix)]
                                                     {
                                                         use std::os::unix::fs::symlink;
-                                                        symlink(&target, &dest_path)?;
+                                                        symlink(&_target, &dest_path)?;
                                                     }
                                                     #[cfg(windows)]
                                                     {
                                                         // On Windows, just skip symlinks for now
                                                         if verbose >= 1 {
-                                                            println!("Skipping symlink on Windows: {}", path.display());
+                                                            println!(
+                                                                "Skipping symlink on Windows: {}",
+                                                                path.display()
+                                                            );
                                                         }
                                                     }
                                                 }
                                                 return Ok(());
                                             }
                                         }
-                                        
+
                                         // Just copy any other special files normally
                                         if verbose >= 2 {
-                                            println!("Copying special file: {} -> {}", path.display(), dest_path.display());
+                                            println!(
+                                                "Copying special file: {} -> {}",
+                                                path.display(),
+                                                dest_path.display()
+                                            );
                                         }
-                                        
+
                                         let bytes_copied = fs::copy(&path, &dest_path)?;
                                         stats.add_bytes_transferred(bytes_copied);
                                     }
@@ -1403,78 +1667,104 @@ impl ParallelSyncer {
                 // Non-Linux or non-optimized path: use standard parallel processing
                 let verbose = options.verbose;
                 let file_counter = std::sync::atomic::AtomicU64::new(0);
-                
+
                 pool.install(|| {
                     use rayon::prelude::*;
                     small_files
                         .into_par_iter()
                         .try_for_each(|operation| -> Result<()> {
                             match operation {
-                                FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                                    let current_file = file_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                FileOperation::Create { path }
+                                | FileOperation::Update { path, .. } => {
+                                    let current_file = file_counter
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     let start_time = std::time::Instant::now();
                                     if current_file % 100 == 0 || current_file > 3560 {
-                                        println!("Processing file #{}: {}", current_file, path.display());
+                                        println!(
+                                            "Processing file #{}: {}",
+                                            current_file,
+                                            path.display()
+                                        );
                                     }
                                     // Use symlink_metadata to check without following symlinks
                                     if let Ok(metadata) = fs::symlink_metadata(&path) {
                                         let file_type = metadata.file_type();
-                                        
+
                                         // Handle symlinks specially
                                         if file_type.is_symlink() {
                                             if verbose >= 1 {
                                                 println!("Handling symlink: {}", path.display());
                                             }
-                                            let dest_path = self.map_source_to_dest(&path, source, destination)?;
-                                            
+                                            let dest_path = self.map_source_to_dest(
+                                                &path,
+                                                source,
+                                                destination,
+                                            )?;
+
                                             // Copy the symlink itself, not what it points to
-                                            if let Ok(target) = fs::read_link(&path) {
+                                            if let Ok(_target) = fs::read_link(&path) {
                                                 // Remove destination if it exists
                                                 let _ = fs::remove_file(&dest_path);
-                                                
+
                                                 #[cfg(unix)]
                                                 {
                                                     use std::os::unix::fs::symlink;
-                                                    symlink(&target, &dest_path)?;
+                                                    symlink(&_target, &dest_path)?;
                                                 }
                                                 #[cfg(windows)]
                                                 {
                                                     // On Windows, just skip symlinks for now
                                                     if verbose >= 1 {
-                                                        println!("Skipping symlink on Windows: {}", path.display());
+                                                        println!(
+                                                            "Skipping symlink on Windows: {}",
+                                                            path.display()
+                                                        );
                                                     }
                                                 }
                                             }
                                             return Ok(());
                                         }
-                                        
+
                                         // Skip other special files
                                         if !file_type.is_file() && !file_type.is_dir() {
                                             if verbose >= 1 {
-                                                println!("Skipping special file: {}", path.display());
+                                                println!(
+                                                    "Skipping special file: {}",
+                                                    path.display()
+                                                );
                                             }
                                             return Ok(());
                                         }
                                     }
-                                    
+
                                     // Regular file copy
-                                    let dest_path = self.map_source_to_dest(&path, source, destination)?;
-                                    
+                                    let dest_path =
+                                        self.map_source_to_dest(&path, source, destination)?;
+
                                     // Debug: Log files being processed in verbose mode
                                     if verbose >= 2 {
-                                        println!("Copying: {} -> {}", path.display(), dest_path.display());
+                                        println!(
+                                            "Copying: {} -> {}",
+                                            path.display(),
+                                            dest_path.display()
+                                        );
                                     }
-                                    
+
                                     let bytes_copied = fs::copy(&path, &dest_path)?;
                                     stats.add_bytes_transferred(bytes_copied);
-                                    
+
                                     // Log slow files
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 1 {
-                                        println!("SLOW FILE #{}: {} took {:.2}s ({} bytes)", 
-                                            current_file, path.display(), elapsed.as_secs_f64(), bytes_copied);
+                                        println!(
+                                            "SLOW FILE #{}: {} took {:.2}s ({} bytes)",
+                                            current_file,
+                                            path.display(),
+                                            elapsed.as_secs_f64(),
+                                            bytes_copied
+                                        );
                                     }
-                                    
+
                                     // Temporarily disable progress updates for small files to avoid mutex contention
                                     // TODO: Implement lock-free progress tracking
                                 }
@@ -1484,84 +1774,110 @@ impl ParallelSyncer {
                         })
                 })?;
             }
-            
+
             #[cfg(not(target_os = "linux"))]
             {
                 // Non-Linux path: use standard parallel processing
                 let verbose = options.verbose;
                 let file_counter = std::sync::atomic::AtomicU64::new(0);
-                
+
                 pool.install(|| {
                     use rayon::prelude::*;
                     small_files
                         .into_par_iter()
                         .try_for_each(|operation| -> Result<()> {
                             match operation {
-                                FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                                    let current_file = file_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                FileOperation::Create { path }
+                                | FileOperation::Update { path, .. } => {
+                                    let current_file = file_counter
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     let start_time = std::time::Instant::now();
                                     if current_file % 100 == 0 || current_file > 3560 {
-                                        println!("Processing file #{}: {}", current_file, path.display());
+                                        println!(
+                                            "Processing file #{}: {}",
+                                            current_file,
+                                            path.display()
+                                        );
                                     }
                                     // Use symlink_metadata to check without following symlinks
                                     if let Ok(metadata) = fs::symlink_metadata(&path) {
                                         let file_type = metadata.file_type();
-                                        
+
                                         // Handle symlinks specially
                                         if file_type.is_symlink() {
                                             if verbose >= 1 {
                                                 println!("Handling symlink: {}", path.display());
                                             }
-                                            let dest_path = self.map_source_to_dest(&path, source, destination)?;
-                                            
+                                            let dest_path = self.map_source_to_dest(
+                                                &path,
+                                                source,
+                                                destination,
+                                            )?;
+
                                             // Copy the symlink itself, not what it points to
-                                            if let Ok(target) = fs::read_link(&path) {
+                                            if let Ok(_target) = fs::read_link(&path) {
                                                 // Remove destination if it exists
                                                 let _ = fs::remove_file(&dest_path);
-                                                
+
                                                 #[cfg(unix)]
                                                 {
                                                     use std::os::unix::fs::symlink;
-                                                    symlink(&target, &dest_path)?;
+                                                    symlink(&_target, &dest_path)?;
                                                 }
                                                 #[cfg(windows)]
                                                 {
                                                     // On Windows, just skip symlinks for now
                                                     if verbose >= 1 {
-                                                        println!("Skipping symlink on Windows: {}", path.display());
+                                                        println!(
+                                                            "Skipping symlink on Windows: {}",
+                                                            path.display()
+                                                        );
                                                     }
                                                 }
                                             }
                                             return Ok(());
                                         }
-                                        
+
                                         // Skip other special files
                                         if !file_type.is_file() && !file_type.is_dir() {
                                             if verbose >= 1 {
-                                                println!("Skipping special file: {}", path.display());
+                                                println!(
+                                                    "Skipping special file: {}",
+                                                    path.display()
+                                                );
                                             }
                                             return Ok(());
                                         }
                                     }
-                                    
+
                                     // Regular file copy
-                                    let dest_path = self.map_source_to_dest(&path, source, destination)?;
-                                    
+                                    let dest_path =
+                                        self.map_source_to_dest(&path, source, destination)?;
+
                                     // Debug: Log files being processed in verbose mode
                                     if verbose >= 2 {
-                                        println!("Copying: {} -> {}", path.display(), dest_path.display());
+                                        println!(
+                                            "Copying: {} -> {}",
+                                            path.display(),
+                                            dest_path.display()
+                                        );
                                     }
-                                    
+
                                     let bytes_copied = fs::copy(&path, &dest_path)?;
                                     stats.add_bytes_transferred(bytes_copied);
-                                    
+
                                     // Log slow files
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 1 {
-                                        println!("SLOW FILE #{}: {} took {:.2}s ({} bytes)", 
-                                            current_file, path.display(), elapsed.as_secs_f64(), bytes_copied);
+                                        println!(
+                                            "SLOW FILE #{}: {} took {:.2}s ({} bytes)",
+                                            current_file,
+                                            path.display(),
+                                            elapsed.as_secs_f64(),
+                                            bytes_copied
+                                        );
                                     }
-                                    
+
                                     // Temporarily disable progress updates for small files to avoid mutex contention
                                     // TODO: Implement lock-free progress tracking
                                 }
@@ -1571,7 +1887,7 @@ impl ParallelSyncer {
                         })
                 })?;
             }
-            
+
             // Update progress for all small files at once
             if let Ok(mut log) = logger_arc.lock() {
                 log.update_progress(small_files_count as u64, 0);
@@ -1608,7 +1924,7 @@ impl ParallelSyncer {
         let mut logger = Arc::try_unwrap(logger_arc)
             .map_err(|_| anyhow::anyhow!("Failed to recover logger"))?
             .into_inner()
-            .unwrap();
+            .map_err(|e| anyhow::anyhow!("Failed to lock logger mutex: {:?}", e))?;
 
         // Process delete operations last (sequentially to avoid issues)
         for operation in delete_ops {
@@ -1632,8 +1948,8 @@ impl ParallelSyncer {
             mp.clear().ok();
         }
 
-        let final_stats = Arc::try_unwrap(stats).unwrap();
-        
+        let final_stats = Arc::try_unwrap(stats).unwrap_or_else(|arc| (*arc).clone());
+
         // Use formatted display for completion
         let elapsed = start_time.elapsed();
         let throughput = if elapsed.as_secs() > 0 {
@@ -1641,10 +1957,10 @@ impl ParallelSyncer {
         } else {
             final_stats.bytes_transferred()
         };
-        
-        
+
         if final_stats.files_deleted() > 0 {
-            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
+            println!(
+                "\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(final_stats.files_copied()),
                 format_number(final_stats.files_deleted()),
@@ -1652,7 +1968,8 @@ impl ParallelSyncer {
                 humanize_bytes(throughput)
             );
         } else {
-            println!("\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
+            println!(
+                "\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
                 elapsed.as_secs_f32(),
                 format_number(final_stats.files_copied()),
                 humanize_bytes(final_stats.bytes_transferred()),
@@ -1691,12 +2008,13 @@ impl ParallelSyncer {
             }
             FileOperation::Create { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
-                
+
                 // Get file info before operations for better error reporting
-                let file_metadata = fs::metadata(&path)
-                    .with_context(|| format!("Failed to read source file metadata: {}", path.display()))?;
+                let file_metadata = fs::metadata(&path).with_context(|| {
+                    format!("Failed to read source file metadata: {}", path.display())
+                })?;
                 let file_size = file_metadata.len();
-                
+
                 if options.verbose >= 1 {
                     logger.log(&format!(
                         "    Copying File    {:>12}  {} -> {}",
@@ -1705,19 +2023,19 @@ impl ParallelSyncer {
                         dest_path.display()
                     ));
                 }
-                
+
                 if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create parent directory: {}", parent.display())
+                    })?;
                 }
 
                 // Parse copy flags and copy file with metadata
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                let bytes_copied = self.copy_file_with_retry_with_warnings(
+                let bytes_copied = copy_file_with_metadata_with_warnings(
                     &path,
                     &dest_path,
                     &copy_flags,
-                    options,
                     &stats.warnings,
                 )?;
 
@@ -1768,18 +2086,18 @@ impl ParallelSyncer {
                 }
 
                 // Always skip delta for now - just do a full copy for maximum performance
-                if false && use_delta {
-                    let file_stats = self.sync_file_pair(&path, &dest_path, options)?;
-                    stats.add_bytes_transferred(file_stats.bytes_transferred());
-                    Ok(file_stats)
-                } else {
+                // TODO: Re-enable delta sync when performance is optimized
+                // if use_delta {
+                //     let file_stats = self.sync_file_pair(&path, &dest_path, options)?;
+                //     stats.add_bytes_transferred(file_stats.bytes_transferred());
+                //     Ok(file_stats)
+                // } else {
                     // Parse copy flags and copy file with metadata
                     let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                    let bytes_copied = self.copy_file_with_retry_with_warnings(
+                    let bytes_copied = copy_file_with_metadata_with_warnings(
                         &path,
                         &dest_path,
                         &copy_flags,
-                        options,
                         &stats.warnings,
                     )?;
 
@@ -1807,7 +2125,6 @@ impl ParallelSyncer {
                     let stats = SyncStats::default();
                     stats.add_bytes_transferred(bytes_copied);
                     Ok(stats)
-                }
             }
             FileOperation::Delete { path } => {
                 // Use symlink_metadata to check type without following symlinks
@@ -1915,15 +2232,20 @@ impl ParallelSyncer {
             }
             FileOperation::Create { path } => {
                 let dest_path = self.map_source_to_dest(&path, source_root, dest_root)?;
-                
+
                 // Create parent directory if needed
                 if let Some(parent) = dest_path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
 
                 // SUPER SIMPLE COPY - just use fs::copy directly
-                let bytes_copied = fs::copy(&path, &dest_path)
-                    .with_context(|| format!("Failed to copy: {} -> {}", path.display(), dest_path.display()))?;
+                let bytes_copied = fs::copy(&path, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to copy: {} -> {}",
+                        path.display(),
+                        dest_path.display()
+                    )
+                })?;
 
                 // If move mode is enabled, delete source file after successful copy
                 if options.move_files && !options.dry_run {
@@ -1968,8 +2290,13 @@ impl ParallelSyncer {
                 }
 
                 // SUPER SIMPLE COPY for updates too
-                let bytes_copied = fs::copy(&path, &dest_path)
-                    .with_context(|| format!("Failed to update: {} -> {}", path.display(), dest_path.display()))?;
+                let bytes_copied = fs::copy(&path, &dest_path).with_context(|| {
+                    format!(
+                        "Failed to update: {} -> {}",
+                        path.display(),
+                        dest_path.display()
+                    )
+                })?;
 
                 // If move mode is enabled, delete source file after successful copy
                 if options.move_files && !options.dry_run {
@@ -2678,85 +3005,7 @@ impl ParallelSyncer {
 
         Ok(total_bytes)
     }
-
-    /// Copy file with metadata, using retry logic if configured
-    fn copy_file_with_retry(
-        &self,
-        source: &Path,
-        dest: &Path,
-        copy_flags: &CopyFlags,
-        options: &SyncOptions,
-    ) -> Result<u64> {
-        self.copy_file_with_retry_internal(source, dest, copy_flags, options, None)
-    }
-
-    /// Copy file with metadata, using retry logic if configured, with warnings collector
-    fn copy_file_with_retry_with_warnings(
-        &self,
-        source: &Path,
-        dest: &Path,
-        copy_flags: &CopyFlags,
-        options: &SyncOptions,
-        warnings: &Arc<Mutex<Vec<String>>>,
-    ) -> Result<u64> {
-        self.copy_file_with_retry_internal(source, dest, copy_flags, options, Some(warnings))
-    }
-
-    /// Internal implementation for copy_file_with_retry
-    fn copy_file_with_retry_internal(
-        &self,
-        source: &Path,
-        dest: &Path,
-        copy_flags: &CopyFlags,
-        options: &SyncOptions,
-        warnings: Option<&Arc<Mutex<Vec<String>>>>,
-    ) -> Result<u64> {
-        let retry_config = RetryConfig::new(options.retry_count, options.retry_wait);
-
-        if retry_config.should_retry() {
-            // Use retry logic
-            let description = format!("Copy {}", source.display());
-
-            // We need to handle the logger mutex carefully
-            let result = with_retry(
-                || {
-                    if let Some(warnings) = warnings {
-                        copy_file_with_metadata_with_warnings(source, dest, copy_flags, warnings)
-                    } else {
-                        copy_file_with_metadata(source, dest, copy_flags)
-                    }
-                },
-                &retry_config,
-                &description,
-                None, // We'll log retries separately
-            );
-
-            result.with_context(|| {
-                format!(
-                    "Failed to copy file after {} retries: {} -> {}",
-                    retry_config.max_retries,
-                    source.display(),
-                    dest.display()
-                )
-            })
-        } else {
-            // No retry
-            if let Some(warnings) = warnings {
-                copy_file_with_metadata_with_warnings(source, dest, copy_flags, warnings)
-            } else {
-                copy_file_with_metadata(source, dest, copy_flags)
-            }
-            .with_context(|| {
-                format!(
-                    "Failed to copy file: {} -> {}",
-                    source.display(),
-                    dest.display()
-                )
-            })
-        }
-    }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2776,7 +3025,9 @@ mod tests {
         let syncer = ParallelSyncer::new(config);
         assert_eq!(
             syncer.config.worker_threads,
-            std::thread::available_parallelism().unwrap().get()
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
         );
     }
 

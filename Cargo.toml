@@ -1,6 +1,6 @@
 [package]
 name = "robosync"
-version = "0.8.15"
+version = "0.8.29"
 edition = "2024"
 authors = ["RoboSync Contributors"]
 description = "High-performance file synchronization with intelligent concurrent processing"
@@ -33,6 +33,17 @@ walkdir = "2.0"
 jwalk = "0.8"  # Parallel directory walking
 filetime = "0.2"
 memmap2 = "0.9"  # Memory-mapped files
+rayon = "1.8"
+indicatif = "0.18.0"
+crossterm = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+num_cpus = "1.16"
+atty = "0.2"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+async-trait = "0.1"
+bincode = "1.3"
 
 # Linux-specific high-performance I/O
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -41,27 +52,6 @@ nix = { version = "0.27", features = ["fs", "mman"] }
 
 # Cross-platform support
 crossbeam = "0.8"
-rayon = "1.8"
-num_cpus = "1.16"
-
-# Progress reporting
-indicatif = "0.18.0"
-atty = "0.2"
-crossterm = "0.27"
-
-# Date/time handling
-chrono = { version = "0.4", features = ["serde"] }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode = "1.3"
-
-# Async traits
-async-trait = "0.1"
-
-# Other utilities
-uuid = { version = "1.10", features = ["v4", "serde"] }
 
 # Shimmer AI integration - compiler ready! 🎉
 # shimmer-runtime = { path = "../llm-pl/crates/shimmer-runtime" }
@@ -71,7 +61,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi"] }
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi", "winbase"] }
 
 [dev-dependencies]
 tempfile = "3.0"

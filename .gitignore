@@ -18,14 +18,22 @@ debug_*
 *context*.txt
 *archive*.txt
 *grok*.txt
+coordination.json
+grok.txt
 
 # Editor/AI assistant files
 .grok/
 .claude/
 claude-suggestions.md
 lint_report.md
+CLAUDE.md
+LINTING_REPORT.md
 
 # Temporary files
 *.tmp
 *.temp
 *.log
+clippy.log
+
+# Error reports
+robosync_errors_*.txt

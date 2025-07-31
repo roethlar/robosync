@@ -1,5 +1,6 @@
 //! Error reporting module for saving detailed error logs
 
+use crate::options::SyncOptions;
 use anyhow::Result;
 use chrono::Local;
 use std::fs::OpenOptions;
@@ -14,6 +15,8 @@ pub struct ErrorReporter {
     warnings: Arc<Mutex<Vec<ErrorEntry>>>,
     error_count: Arc<Mutex<usize>>,
     warning_count: Arc<Mutex<usize>>,
+    verbose: u8,
+    no_progress: bool,
 }
 
 #[derive(Clone)]
@@ -25,34 +28,43 @@ struct ErrorEntry {
 
 impl ErrorReporter {
     /// Create a new error reporter
-    pub fn new(source: &Path, destination: &Path) -> Self {
+    pub fn new(source: &Path, destination: &Path, options: &SyncOptions) -> Self {
         // Create report filename with timestamp and sanitized paths
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-        let source_name = source.file_name()
+        let source_name = source
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .replace('/', "_");
-        let dest_name = destination.file_name()
+        let dest_name = destination
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .replace('/', "_");
-        
+
         let report_filename = format!(
-            "robosync_errors_{}_{}__to__{}.log",
-            timestamp, source_name, dest_name
+            "robosync_errors_{timestamp}_{source_name}__to__{dest_name}.log"
         );
-        
+
         let report_path = PathBuf::from(&report_filename);
-        
+
+        let report_file = if options.no_report_errors {
+            None
+        } else {
+            Some(report_path)
+        };
+
         Self {
-            report_file: Some(report_path),
+            report_file,
             errors: Arc::new(Mutex::new(Vec::new())),
             warnings: Arc::new(Mutex::new(Vec::new())),
             error_count: Arc::new(Mutex::new(0)),
             warning_count: Arc::new(Mutex::new(0)),
+            verbose: options.verbose,
+            no_progress: options.no_progress,
         }
     }
-    
+
     /// Get a handle for error reporting that can be cloned and shared
     pub fn get_handle(&self) -> ErrorReportHandle {
         ErrorReportHandle {
@@ -60,9 +72,11 @@ impl ErrorReporter {
             warnings: Arc::clone(&self.warnings),
             error_count: Arc::clone(&self.error_count),
             warning_count: Arc::clone(&self.warning_count),
+            verbose: self.verbose,
+            no_progress: self.no_progress,
         }
     }
-    
+
     /// Add an error
     pub fn add_error(&self, path: &Path, message: &str) {
         let entry = ErrorEntry {
@@ -70,16 +84,16 @@ impl ErrorReporter {
             path: path.display().to_string(),
             message: message.to_string(),
         };
-        
+
         if let Ok(mut errors) = self.errors.lock() {
             errors.push(entry);
         }
-        
+
         if let Ok(mut count) = self.error_count.lock() {
             *count += 1;
         }
     }
-    
+
     /// Add a warning
     pub fn add_warning(&self, path: &Path, message: &str) {
         let entry = ErrorEntry {
@@ -87,85 +101,95 @@ impl ErrorReporter {
             path: path.display().to_string(),
             message: message.to_string(),
         };
-        
+
         if let Ok(mut warnings) = self.warnings.lock() {
             warnings.push(entry);
         }
-        
+
         if let Ok(mut count) = self.warning_count.lock() {
             *count += 1;
         }
     }
-    
+
     /// Get error count
     pub fn error_count(&self) -> usize {
-        *self.error_count.lock().unwrap_or_else(|_| panic!("Lock poisoned"))
+        *self
+            .error_count
+            .lock()
+            .unwrap_or_else(|_| panic!("Lock poisoned"))
     }
-    
+
     /// Get warning count
     pub fn warning_count(&self) -> usize {
-        *self.warning_count.lock().unwrap_or_else(|_| panic!("Lock poisoned"))
+        *self
+            .warning_count
+            .lock()
+            .unwrap_or_else(|_| panic!("Lock poisoned"))
     }
-    
+
     /// Write the error report to file if there were any errors or warnings
     pub fn write_report(&self) -> Result<Option<PathBuf>> {
         let error_count = self.error_count();
         let warning_count = self.warning_count();
-        
+
         if error_count == 0 && warning_count == 0 {
             return Ok(None);
         }
-        
+
         let report_path = match &self.report_file {
             Some(path) => path,
             None => return Ok(None),
         };
-        
+
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(report_path)?;
-        
+
         // Write header
         writeln!(file, "RoboSync Error Report")?;
-        writeln!(file, "Generated: {}", Local::now().format("%Y-%m-%d %H:%M:%S"))?;
-        writeln!(file, "=")?;
+        writeln!(
+            file,
+            "Generated: {}",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        )?;
+        writeln!(file, "{}=", "=".repeat(78))?;
         writeln!(file)?;
-        
+
         // Write summary
         writeln!(file, "Summary:")?;
-        writeln!(file, "  Errors: {}", error_count)?;
-        writeln!(file, "  Warnings: {}", warning_count)?;
+        writeln!(file, "  Errors: {error_count}")?;
+        writeln!(file, "  Warnings: {warning_count}")?;
         writeln!(file)?;
-        
+
         // Write errors
         if error_count > 0 {
             writeln!(file, "ERRORS:")?;
             writeln!(file, "-------")?;
             if let Ok(errors) = self.errors.lock() {
                 for (i, error) in errors.iter().enumerate() {
-                    writeln!(file, "\n{}. [{}]", i + 1, error.timestamp)?;
-                    writeln!(file, "   File: {}", error.path)?;
-                    writeln!(file, "   Error: {}", error.message)?;
+                    writeln!(file, "\n[{}] Error #{}", error.timestamp, i + 1)?;
+                    writeln!(file, "  File: {}", error.path)?;
+                    writeln!(file, "  Details: {}", error.message)?;
                 }
             }
             writeln!(file)?;
         }
-        
+
         // Write warnings
         if warning_count > 0 {
             writeln!(file, "WARNINGS:")?;
             writeln!(file, "---------")?;
             if let Ok(warnings) = self.warnings.lock() {
                 for (i, warning) in warnings.iter().enumerate() {
-                    writeln!(file, "\n{}. [{}]", i + 1, warning.timestamp)?;
-                    writeln!(file, "   File: {}", warning.path)?;
-                    writeln!(file, "   Warning: {}", warning.message)?;
+                    writeln!(file, "\n[{}] Warning #{}", warning.timestamp, i + 1)?;
+                    writeln!(file, "  File: {}", warning.path)?;
+                    writeln!(file, "  Details: {}", warning.message)?;
                 }
             }
         }
-        
+
         file.flush()?;
         Ok(Some(report_path.clone()))
     }
@@ -178,30 +202,49 @@ pub struct ErrorReportHandle {
     warnings: Arc<Mutex<Vec<ErrorEntry>>>,
     error_count: Arc<Mutex<usize>>,
     warning_count: Arc<Mutex<usize>>,
+    verbose: u8,
+    no_progress: bool,
 }
 
 impl ErrorReportHandle {
     /// Add an error
     pub fn add_error(&self, path: &Path, message: &str) {
+        self.add_error_with_operation(path, message, "sync");
+    }
+
+    /// Add an error with operation context
+    pub fn add_error_with_operation(&self, path: &Path, message: &str, operation: &str) {
         let entry = ErrorEntry {
             timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             path: path.display().to_string(),
-            message: message.to_string(),
+            message: format!("{operation}: {message}"),
         };
-        
+
         if let Ok(mut errors) = self.errors.lock() {
             errors.push(entry);
         }
-        
+
         if let Ok(mut count) = self.error_count.lock() {
             *count += 1;
-            // Only print count periodically to reduce noise
-            if *count % 10 == 0 {
-                eprintln!("  [{}] errors encountered (details will be saved to report)", count);
+
+            // Print to console if verbose >= 1
+            if self.verbose >= 1 {
+                eprintln!(
+                    "[{}] Error {}: {} - {}",
+                    Local::now().format("%H:%M:%S"),
+                    operation,
+                    path.display(),
+                    message
+                );
+            } else if !self.no_progress && *count % 10 == 0 {
+                // Only print count periodically if not verbose and progress is shown
+                eprintln!(
+                    "  [{count}] errors encountered (details will be saved to report)"
+                );
             }
         }
     }
-    
+
     /// Add a warning
     pub fn add_warning(&self, path: &Path, message: &str) {
         let entry = ErrorEntry {
@@ -209,17 +252,33 @@ impl ErrorReportHandle {
             path: path.display().to_string(),
             message: message.to_string(),
         };
-        
+
         if let Ok(mut warnings) = self.warnings.lock() {
             warnings.push(entry);
         }
-        
+
         if let Ok(mut count) = self.warning_count.lock() {
             *count += 1;
             // Only print count periodically to reduce noise
             if *count % 10 == 0 {
-                eprintln!("  [{}] warnings encountered (details will be saved to report)", count);
+                eprintln!(
+                    "  [{count}] warnings encountered (details will be saved to report)"
+                );
             }
         }
+    }
+
+    /// Log a successful operation (only shown with -vv)
+    pub fn log_success(&self, path: &Path, operation: &str) {
+        if self.verbose >= 2 {
+            let timestamp = Local::now().format("%H:%M:%S");
+            println!("[{}] {} {}", timestamp, operation, path.display());
+        }
+    }
+
+    /// Check if we should show progress bars
+    pub fn should_show_progress(&self) -> bool {
+        // No progress bar with -vv or --no-progress
+        self.verbose < 2 && !self.no_progress
     }
 }

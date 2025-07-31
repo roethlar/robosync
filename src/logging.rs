@@ -65,15 +65,13 @@ impl SyncLogger {
     }
 
     /// Log an error message
-    #[allow(dead_code)]
     pub fn log_error(&self, error: &str) {
-        let message = format!("ERROR: {error}");
-        eprintln!("{message}");
+        eprintln!("ERROR: {error}");
 
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
                 let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                if let Err(e) = writeln!(writer, "[{timestamp}] {message}") {
+                if let Err(e) = writeln!(writer, "[{timestamp}] ERROR: {error}") {
                     eprintln!("Warning: Failed to write to log file: {e}");
                 }
                 let _ = writer.flush();
@@ -160,11 +158,15 @@ impl SyncLogger {
         };
 
         let operation_summary = if stats.files_deleted() > 0 {
-            format!("{} files copied, {} files deleted", stats.files_copied(), stats.files_deleted())
+            format!(
+                "{} files copied, {} files deleted",
+                stats.files_copied(),
+                stats.files_deleted()
+            )
         } else {
             format!("{} files", stats.files_copied())
         };
-        
+
         let summary = format!(
             "Parallel synchronization completed successfully! {}, {} bytes transferred in {:.2}s ({})",
             operation_summary,
@@ -193,7 +195,6 @@ impl SyncLogger {
     }
 
     /// Flush and close the log file
-    #[allow(dead_code)]
     pub fn close(&self) {
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {

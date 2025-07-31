@@ -16,7 +16,6 @@ pub enum SymlinkBehavior {
 /// Synchronization options parsed from command line
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
-    #[allow(dead_code)]
     pub recursive: bool,
     pub purge: bool,
     pub mirror: bool,
@@ -41,6 +40,7 @@ pub struct SyncOptions {
     pub linux_optimized: bool,
     pub forced_strategy: Option<String>,
     pub symlink_behavior: SymlinkBehavior,
+    pub no_report_errors: bool,
     // shimmer_model_path removed - AI features moved to separate project
 }
 
@@ -71,6 +71,7 @@ impl Default for SyncOptions {
             linux_optimized: false,
             forced_strategy: None,
             symlink_behavior: SymlinkBehavior::Preserve,
+            no_report_errors: false,
         }
     }
 }

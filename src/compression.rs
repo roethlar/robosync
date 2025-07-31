@@ -3,9 +3,16 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 
+// Constants for compression configuration
+const MIN_COMPRESS_SIZE: usize = 64; // Minimum size to attempt compression
+const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks for streaming
+const MAX_DECOMPRESSED_SIZE: usize = 256 * 1024 * 1024; // 256MB max for safety
+const DEFAULT_ZSTD_LEVEL: i32 = 3; // Balanced speed/compression
+const FAST_LZ4_LEVEL: i32 = 1; // Fast compression for LZ4
+const BEST_ZSTD_LEVEL: i32 = 19; // Maximum compression for zstd
+
 /// Compression algorithms supported
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[allow(dead_code)]
 pub enum CompressionType {
     None,
     #[default]
@@ -24,27 +31,25 @@ impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             algorithm: CompressionType::Zstd,
-            level: 3, // Balanced speed/compression for zstd
+            level: DEFAULT_ZSTD_LEVEL, // Balanced speed/compression for zstd
         }
     }
 }
 
 impl CompressionConfig {
     /// Create config optimized for speed
-    #[allow(dead_code)]
     pub fn fast() -> Self {
         Self {
             algorithm: CompressionType::Lz4,
-            level: 1,
+            level: FAST_LZ4_LEVEL,
         }
     }
 
     /// Create config optimized for compression ratio
-    #[allow(dead_code)]
     pub fn best() -> Self {
         Self {
             algorithm: CompressionType::Zstd,
-            level: 19,
+            level: BEST_ZSTD_LEVEL,
         }
     }
 
@@ -52,7 +57,7 @@ impl CompressionConfig {
     pub fn balanced() -> Self {
         Self {
             algorithm: CompressionType::Zstd,
-            level: 3,
+            level: DEFAULT_ZSTD_LEVEL,
         }
     }
 }
@@ -68,16 +73,66 @@ pub fn compress_data(data: &[u8], config: CompressionConfig) -> Result<Vec<u8>> 
     }
 }
 
-/// Decompress data using the specified algorithm
+/// Decompress data using the specified algorithm with dynamic sizing
 pub fn decompress_data(data: &[u8], algorithm: CompressionType) -> Result<Vec<u8>> {
     match algorithm {
         CompressionType::None => Ok(data.to_vec()),
         CompressionType::Zstd => {
-            zstd::bulk::decompress(data, 16 * 1024 * 1024) // 16MB max decompressed size
-                .context("Failed to decompress data with zstd")
+            // Try to get the decompressed size from the frame header
+            match zstd::bulk::Decompressor::upper_bound(data) {
+                Some(size) if size > 0 && size <= MAX_DECOMPRESSED_SIZE => {
+                    // Use the known size if reasonable
+                    zstd::bulk::decompress(data, size)
+                        .context("Failed to decompress data with zstd")
+                }
+                _ => {
+                    // Fall back to streaming decompression for unknown or large sizes
+                    let mut decoder = zstd::stream::Decoder::new(data)
+                        .context("Failed to create zstd decoder")?;
+                    let mut decompressed = Vec::new();
+                    decoder
+                        .read_to_end(&mut decompressed)
+                        .context("Failed to decompress data with zstd")?;
+                    Ok(decompressed)
+                }
+            }
         }
         CompressionType::Lz4 => {
             lz4_flex::decompress_size_prepended(data).context("Failed to decompress data with lz4")
+        }
+    }
+}
+
+/// Estimate if compression would be beneficial for given data size
+pub fn should_compress(data_size: usize) -> bool {
+    data_size >= MIN_COMPRESS_SIZE
+}
+
+/// Get optimal buffer size for decompression based on compressed data
+pub fn get_decompression_buffer_size(
+    compressed_data: &[u8],
+    algorithm: CompressionType,
+) -> Option<usize> {
+    match algorithm {
+        CompressionType::None => Some(compressed_data.len()),
+        CompressionType::Zstd => zstd::bulk::Decompressor::upper_bound(compressed_data),
+        CompressionType::Lz4 => {
+            // LZ4 with prepended size stores the size in the first 4 bytes
+            if compressed_data.len() >= 4 {
+                let size = u32::from_le_bytes([
+                    compressed_data[0],
+                    compressed_data[1],
+                    compressed_data[2],
+                    compressed_data[3],
+                ]) as usize;
+                if size <= MAX_DECOMPRESSED_SIZE {
+                    Some(size)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
     }
 }
@@ -87,14 +142,16 @@ pub fn decompress_data(data: &[u8], algorithm: CompressionType) -> Result<Vec<u8
 /// literal data chunks that can benefit from compression
 pub fn compress_literal_data(literal_data: &[u8], config: CompressionConfig) -> Result<Vec<u8>> {
     // Only compress if the data is large enough to benefit
-    if literal_data.len() < 64 {
+    if !should_compress(literal_data.len()) {
         return Ok(literal_data.to_vec());
     }
 
     let compressed = compress_data(literal_data, config)?;
 
     // Only use compressed version if it's actually smaller
-    if compressed.len() < literal_data.len() {
+    // and achieves at least 10% compression ratio
+    let compression_ratio = compression_ratio(literal_data.len() as u64, compressed.len() as u64);
+    if compressed.len() < literal_data.len() && compression_ratio >= 10.0 {
         Ok(compressed)
     } else {
         Ok(literal_data.to_vec())
@@ -102,19 +159,16 @@ pub fn compress_literal_data(literal_data: &[u8], config: CompressionConfig) -> 
 }
 
 /// Streaming compressor for large files
-#[allow(dead_code)]
 pub struct StreamingCompressor {
     config: CompressionConfig,
 }
 
 impl StreamingCompressor {
-    #[allow(dead_code)]
     pub fn new(config: CompressionConfig) -> Self {
         Self { config }
     }
 
     /// Compress a stream of data
-    #[allow(dead_code)]
     pub fn compress_stream<R: Read, W: Write>(&self, mut reader: R, mut writer: W) -> Result<u64> {
         match self.config.algorithm {
             CompressionType::None => std::io::copy(&mut reader, &mut writer)
@@ -131,7 +185,7 @@ impl StreamingCompressor {
             }
             CompressionType::Lz4 => {
                 // LZ4 doesn't have a streaming encoder in lz4_flex, so we read chunks
-                let mut buffer = vec![0u8; 64 * 1024]; // 64KB chunks
+                let mut buffer = vec![0u8; CHUNK_SIZE];
                 let mut total_read = 0u64;
 
                 loop {
@@ -169,19 +223,16 @@ impl StreamingCompressor {
 }
 
 /// Streaming decompressor for large files
-#[allow(dead_code)]
 pub struct StreamingDecompressor {
     algorithm: CompressionType,
 }
 
 impl StreamingDecompressor {
-    #[allow(dead_code)]
     pub fn new(algorithm: CompressionType) -> Self {
         Self { algorithm }
     }
 
     /// Decompress a stream of data
-    #[allow(dead_code)]
     pub fn decompress_stream<R: Read, W: Write>(
         &self,
         mut reader: R,
@@ -217,9 +268,10 @@ impl StreamingDecompressor {
                         .read_exact(&mut compressed_chunk)
                         .context("Failed to read compressed chunk")?;
 
-                    // Decompress chunk
-                    let decompressed = lz4_flex::decompress(&compressed_chunk, 16 * 1024 * 1024)
-                        .context("Failed to decompress lz4 chunk")?;
+                    // Decompress chunk with size limit for safety
+                    let decompressed =
+                        lz4_flex::decompress(&compressed_chunk, MAX_DECOMPRESSED_SIZE)
+                            .context("Failed to decompress lz4 chunk")?;
 
                     // Write decompressed data
                     writer
@@ -236,7 +288,6 @@ impl StreamingDecompressor {
 }
 
 /// Calculate compression ratio as a percentage
-#[allow(dead_code)]
 pub fn compression_ratio(original_size: u64, compressed_size: u64) -> f64 {
     if original_size == 0 {
         return 0.0;

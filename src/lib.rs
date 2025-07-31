@@ -11,11 +11,17 @@
 
 pub mod algorithm;
 pub mod checksum;
+pub mod color_output;
 pub mod compression;
 pub mod error;
+pub mod error_logger;
+pub mod error_report;
+pub mod fast_file_list;
 pub mod file_list;
+pub mod formatted_display;
 pub mod logging;
 pub mod metadata;
+pub mod mixed_strategy;
 pub mod native_tools;
 pub mod options;
 pub mod parallel_sync;
@@ -25,13 +31,6 @@ pub mod retry;
 pub mod strategy;
 pub mod sync;
 pub mod sync_stats;
-pub mod mixed_strategy;
-pub mod fast_file_list;
-pub mod multi_progress;
-pub mod scrolling_progress;
-pub mod formatted_display;
-pub mod color_output;
-pub mod error_report;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]
@@ -42,9 +41,9 @@ pub mod linux_parallel_sync;
 
 pub use algorithm::DeltaAlgorithm;
 pub use checksum::ChecksumType;
-pub use error::{RoboSyncError, Result};
+pub use error::{Result, RoboSyncError};
 pub use options::SyncOptions;
 pub use parallel_sync::{ParallelSyncConfig, ParallelSyncer};
-pub use retry::{with_retry, RetryConfig};
+pub use retry::{RetryConfig, with_retry};
 pub use sync::synchronize;
 pub use sync_stats::SyncStats;

@@ -1,6 +1,6 @@
 //! File list generation and management
 
-use crate::options::{SyncOptions, SymlinkBehavior};
+use crate::options::{SymlinkBehavior, SyncOptions};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,7 +31,10 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
                 // Skip permission errors
                 if let Some(io_err) = e.io_error() {
                     if io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                        eprintln!("Warning: Skipping inaccessible path: {}", e.path().unwrap_or(Path::new("<unknown>")).display());
+                        eprintln!(
+                            "Warning: Skipping inaccessible path: {}",
+                            e.path().unwrap_or(Path::new("<unknown>")).display()
+                        );
                         continue;
                     }
                 }
@@ -39,7 +42,7 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
             }
         };
         let path = entry.path();
-        
+
         // Skip the root directory itself if it's the same as the root we're walking
         if path == root {
             continue;
@@ -71,10 +74,14 @@ pub fn generate_file_list(root: &Path) -> Result<Vec<FileInfo>> {
             path.to_path_buf()
         } else {
             // This shouldn't happen, but if it does, try to clean it up
-            eprintln!("WARNING: Path {} is not under root {}", path.display(), root.display());
+            eprintln!(
+                "WARNING: Path {} is not under root {}",
+                path.display(),
+                root.display()
+            );
             path.to_path_buf()
         };
-        
+
         let file_info = FileInfo {
             path: clean_path,
             size: metadata.len(),
@@ -109,8 +116,8 @@ where
     F: Fn(usize) + Send + Sync,
 {
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // First, collect all entries without checksums
     let mut file_infos = Vec::new();
@@ -119,7 +126,7 @@ where
 
     // Clone exclude_dirs for the filter closure
     let exclude_dirs = options.exclude_dirs.clone();
-    
+
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -128,7 +135,7 @@ where
             if e.path() == root {
                 return true;
             }
-            
+
             // Check if this is a directory that should be excluded
             if e.file_type().is_dir() {
                 if let Some(name) = e.file_name().to_str() {
@@ -148,7 +155,10 @@ where
                 // Skip permission errors
                 if let Some(io_err) = e.io_error() {
                     if io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                        eprintln!("Warning: Skipping inaccessible path: {}", e.path().unwrap_or(Path::new("<unknown>")).display());
+                        eprintln!(
+                            "Warning: Skipping inaccessible path: {}",
+                            e.path().unwrap_or(Path::new("<unknown>")).display()
+                        );
                         continue;
                     }
                 }
@@ -156,7 +166,7 @@ where
             }
         };
         let path = entry.path();
-        
+
         // Skip the root directory itself if it's the same as the root we're walking
         if path == root {
             continue;
@@ -259,8 +269,8 @@ where
                 checksum: None,
             }
         };
-        
-        // Apply filters if not skipping  
+
+        // Apply filters if not skipping
         if !skip_file && should_include_file(&actual_file_info, root, options) {
             // Check if we need to compute checksum for this file
             if options.checksum && !actual_file_info.is_symlink && !actual_file_info.is_directory {
@@ -310,43 +320,43 @@ where
 /// Generate file list using parallel directory scanning (Linux optimized)
 #[cfg(target_os = "linux")]
 pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
-    use jwalk::WalkDir as JWalkDir;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use rayon::prelude::*;
     use crate::options::SymlinkBehavior;
-    
+    use jwalk::WalkDir as JWalkDir;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     let file_count = AtomicUsize::new(0);
-    
+
     // Use jwalk for parallel directory traversal
     let entries: Vec<FileInfo> = JWalkDir::new(root)
         .parallelism(jwalk::Parallelism::RayonNewPool(num_cpus::get()))
         .skip_hidden(false)
         .follow_links(false)
         .into_iter()
-        .par_bridge()  // Convert to parallel iterator
+        .par_bridge() // Convert to parallel iterator
         .filter_map(|entry| {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
-                    
+
                     // Skip the root directory itself
                     if path == root {
                         return None;
                     }
-                    
+
                     // Get metadata
                     let metadata = match entry.metadata() {
                         Ok(m) => m,
                         Err(_) => return None,
                     };
-                    
+
                     let is_symlink = metadata.is_symlink();
                     let symlink_target = if is_symlink {
                         std::fs::read_link(&path).ok()
                     } else {
                         None
                     };
-                    
+
                     // Handle symlink behavior first
                     let mut skip_file = false;
                     let actual_file_info = if is_symlink {
@@ -357,7 +367,9 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                 FileInfo {
                                     path,
                                     size: metadata.len(),
-                                    modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                    modified: metadata
+                                        .modified()
+                                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                     is_directory: metadata.is_dir(),
                                     is_symlink,
                                     symlink_target,
@@ -369,7 +381,9 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                 FileInfo {
                                     path,
                                     size: metadata.len(),
-                                    modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                    modified: metadata
+                                        .modified()
+                                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                     is_directory: metadata.is_dir(),
                                     is_symlink,
                                     symlink_target,
@@ -387,7 +401,9 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                             FileInfo {
                                                 path,
                                                 size: metadata.len(),
-                                                modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                                modified: metadata
+                                                    .modified()
+                                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                                 is_directory: metadata.is_dir(),
                                                 is_symlink,
                                                 symlink_target,
@@ -401,7 +417,9 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                                     FileInfo {
                                         path,
                                         size: metadata.len(),
-                                        modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                        modified: metadata
+                                            .modified()
+                                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                                         is_directory: metadata.is_dir(),
                                         is_symlink,
                                         symlink_target,
@@ -414,14 +432,16 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                         FileInfo {
                             path,
                             size: metadata.len(),
-                            modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            modified: metadata
+                                .modified()
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                             is_directory: metadata.is_dir(),
                             is_symlink,
                             symlink_target,
                             checksum: None,
                         }
                     };
-                    
+
                     // Apply filters if not skipping
                     if !skip_file && should_include_file(&actual_file_info, root, options) {
                         file_count.fetch_add(1, Ordering::Relaxed);
@@ -434,7 +454,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
             }
         })
         .collect();
-    
+
     // If checksums are needed, compute them in parallel
     if options.checksum {
         let entries_with_checksums: Vec<FileInfo> = entries
@@ -446,7 +466,7 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                 Ok(file_info)
             })
             .collect::<Result<Vec<_>>>()?;
-        
+
         Ok(entries_with_checksums)
     } else {
         Ok(entries)
@@ -604,8 +624,8 @@ where
     F: Fn(usize) + Send + Sync,
 {
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Pre-compute target map with relative paths for faster lookup
     let target_map: HashMap<PathBuf, &FileInfo> = target
@@ -776,7 +796,6 @@ where
 }
 
 /// Compare two file lists to find differences (legacy function for backward compatibility)
-#[allow(dead_code)]
 pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileOperation> {
     // Use default options for backward compatibility
     let default_options = SyncOptions::default();
@@ -784,7 +803,6 @@ pub fn compare_file_lists(source: &[FileInfo], target: &[FileInfo]) -> Vec<FileO
 }
 
 /// Compare two file lists to find differences with options
-#[allow(dead_code)]
 pub fn compare_file_lists_with_options(
     source: &[FileInfo],
     target: &[FileInfo],
@@ -1110,6 +1128,7 @@ mod tests {
             checksum: false,
             forced_strategy: None,
             symlink_behavior: crate::options::SymlinkBehavior::Preserve,
+            no_report_errors: false,
             #[cfg(target_os = "linux")]
             linux_optimized: false,
         };
@@ -1299,11 +1318,15 @@ fn dereference_symlink(symlink_path: &Path, target_path: &Path) -> Result<FileIn
             target_path.to_path_buf()
         }
     };
-    
+
     // Get metadata of the target (following the symlink)
-    let metadata = std::fs::metadata(&resolved_target)
-        .with_context(|| format!("Failed to get metadata for symlink target: {}", resolved_target.display()))?;
-    
+    let metadata = std::fs::metadata(&resolved_target).with_context(|| {
+        format!(
+            "Failed to get metadata for symlink target: {}",
+            resolved_target.display()
+        )
+    })?;
+
     // Create FileInfo for the target, but keep the original symlink path
     // This way the file will be copied to the symlink's location but with the target's content
     Ok(FileInfo {
@@ -1311,8 +1334,8 @@ fn dereference_symlink(symlink_path: &Path, target_path: &Path) -> Result<FileIn
         size: metadata.len(),
         modified: metadata.modified()?,
         is_directory: metadata.is_dir(),
-        is_symlink: false, // This is now treated as a regular file/directory
+        is_symlink: false,    // This is now treated as a regular file/directory
         symlink_target: None, // No longer a symlink
-        checksum: None, // Will be computed later if needed
+        checksum: None,       // Will be computed later if needed
     })
 }

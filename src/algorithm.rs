@@ -3,8 +3,8 @@
 //! This module contains the modern implementation of rsync's delta-transfer algorithm,
 //! based on the rolling checksum approach from the original match.c
 
-use crate::checksum::{get_checksum1, strong_checksum, ChecksumType, RollingChecksum};
-use crate::compression::{compress_literal_data, CompressionConfig};
+use crate::checksum::{ChecksumType, RollingChecksum, get_checksum1, strong_checksum};
+use crate::compression::{CompressionConfig, compress_literal_data};
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -33,7 +33,6 @@ impl DeltaAlgorithm {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_checksum_type(mut self, checksum_type: ChecksumType) -> Self {
         self.checksum_type = checksum_type;
         self
@@ -223,7 +222,6 @@ pub struct BlockChecksum {
 
 /// Represents a match between source and target
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Match {
     /// Block matches existing data at given offset  
     Block {
@@ -248,7 +246,9 @@ mod tests {
         let algorithm = DeltaAlgorithm::new(4);
         let data = b"Hello, World!";
 
-        let checksums = algorithm.generate_checksums(data).unwrap();
+        let checksums = algorithm
+            .generate_checksums(data)
+            .expect("Failed to generate checksums");
 
         // Should have ceil(13/4) = 4 blocks
         assert_eq!(checksums.len(), 4);
@@ -267,8 +267,12 @@ mod tests {
         let algorithm = DeltaAlgorithm::new(4);
         let data = b"Hello, World!";
 
-        let checksums = algorithm.generate_checksums(data).unwrap();
-        let matches = algorithm.find_matches(data, &checksums).unwrap();
+        let checksums = algorithm
+            .generate_checksums(data)
+            .expect("Failed to generate checksums");
+        let matches = algorithm
+            .find_matches(data, &checksums)
+            .expect("Failed to find matches");
 
         // Should be all block matches for identical data
         let block_matches: Vec<_> = matches
@@ -284,7 +288,9 @@ mod tests {
         let algorithm = DeltaAlgorithm::new(4);
         let data = b"Hello, World!";
 
-        let matches = algorithm.find_matches(data, &[]).unwrap();
+        let matches = algorithm
+            .find_matches(data, &[])
+            .expect("Failed to find matches");
 
         // Should be one literal match containing all data
         assert_eq!(matches.len(), 1);
