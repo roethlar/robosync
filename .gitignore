@@ -41,9 +41,25 @@ clippy.log
 # Error reports
 robosync_errors_*.txt
 
-# Package manager templates (need SHA256 updates)
-homebrew-formula.rb
-PKGBUILD
-robosync.json
-robosync.nix
-snap/
+# Test data and performance files
+perf_*/
+quick_perf*/
+*_test_*/
+np_test_*/
+
+# Coordination files (development artifacts)
+coordination/
+
+# Build artifacts
+release/
+*.zip
+*.tar.gz
+robosync
+
+# Temporary scripts
+scripts/
+
+# Keep package manager files - we still need these!
+# homebrew-formula-source.rb (KEEP)
+# PKGBUILD (KEEP) 
+# robosync.json (KEEP)

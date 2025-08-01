@@ -1,6 +1,6 @@
 [package]
 name = "robosync"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 authors = ["RoboSync Contributors"]
 description = "High-performance file synchronization with intelligent concurrent processing"
@@ -18,8 +18,20 @@ exclude = [
     "!README.md",
     "CLAUDE.md",
     ".grok/",
-    "coordination.json",
-    "conversation_backup.md"
+    "coordination/",
+    "coordination.json", 
+    "conversation_backup.md",
+    "perf_*/",
+    "quick_perf*/",
+    "*_test_*/",
+    "np_test_*/",
+    "release/",
+    "homebrew-*/",
+    "*.zip",
+    "*.tar.gz",
+    "robosync",
+    "scripts/",
+    "PKGBUILD"
 ]
 
 [dependencies]
