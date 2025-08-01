@@ -499,12 +499,14 @@ fn main() -> Result<()> {
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
     // Print header without lines
-    println!(
-        "     {} v{}: {}",
-        "RoboSync".color_bold_if(Color::Cyan),
-        env!("CARGO_PKG_VERSION").color_if(Color::White),
-        "Fast parallel file synchronization".color_if(Color::White)
-    );
+    if !no_progress {
+        println!(
+            "     {} v{}: {}",
+            "RoboSync".color_bold_if(Color::Cyan),
+            env!("CARGO_PKG_VERSION").color_if(Color::White),
+            "Fast parallel file synchronization".color_if(Color::White)
+        );
+    }
 
     // Calculate the max width needed for all content
     let source_str = source.display().to_string();
@@ -564,23 +566,25 @@ fn main() -> Result<()> {
     let _table_width = max_len.max(44) + 2; // At least 44 chars, plus padding
 
     // Display configuration
-    println!();
-    println!(
-        "     {}  {}",
-        "Source:".color_if(Color::White),
-        source_str.as_str().color_if(Color::Green)
-    );
-    println!(
-        "     {}    {}",
-        "Dest:".color_if(Color::White),
-        dest_str.as_str().color_if(Color::Yellow)
-    );
-    if !options_str.is_empty() {
+    if !no_progress {
+        println!();
         println!(
-            "     {} {}",
-            "Options:".color_if(Color::White),
-            options_str.as_str().color_if(Color::DarkGrey)
+            "     {}  {}",
+            "Source:".color_if(Color::White),
+            source_str.as_str().color_if(Color::Green)
         );
+        println!(
+            "     {}    {}",
+            "Dest:".color_if(Color::White),
+            dest_str.as_str().color_if(Color::Yellow)
+        );
+        if !options_str.is_empty() {
+            println!(
+                "     {} {}",
+                "Options:".color_if(Color::White),
+                options_str.as_str().color_if(Color::DarkGrey)
+            );
+        }
     }
 
     // Warn about dangerous combinations

@@ -97,23 +97,32 @@ impl MixedStrategyExecutor {
         use indicatif::{ProgressBar, ProgressStyle};
 
         // Show spinner during categorization for user feedback
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner} {msg}")
-                .expect("Failed to set spinner template")
-        );
-        spinner.set_message("Analyzing files for optimal strategy...");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+        let spinner = if !options.no_progress {
+            let s = ProgressBar::new_spinner();
+            s.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner} {msg}")
+                    .expect("Failed to set spinner template")
+            );
+            s.set_message("Analyzing files for optimal strategy...");
+            s.enable_steady_tick(std::time::Duration::from_millis(100));
+            Some(s)
+        } else {
+            None
+        };
 
         // Categorize files by size and type
         let categorized = self.categorize_operations(operations);
         let operation_count = categorized.total_operations();
         
-        spinner.finish_and_clear();
+        if let Some(spinner) = spinner {
+            spinner.finish_and_clear();
+        }
 
         if operation_count == 0 {
-            println!("\n  ℹ️  No operations to perform - all files are up to date!");
+            if !options.no_progress {
+                println!("\n  ℹ️  No operations to perform - all files are up to date!");
+            }
             return Ok(SyncStats::default());
         }
 
@@ -124,30 +133,32 @@ impl MixedStrategyExecutor {
         // File analysis already printed by parent
 
         // Print pending operations
-        if options.verbose >= 1 {
-            // Verbose mode: show detailed breakdown
-            let detailed_stats = self.calculate_detailed_pending_stats(&categorized, source_root);
-            formatted_display::print_pending_operations_detailed(
-                &detailed_stats,
-                options.verbose,
-            );
-        } else {
-            // Normal mode: show simple summary
-            let pending_stats = self.calculate_pending_stats(&categorized, source_root);
-            formatted_display::print_pending_operations(
-                pending_stats.files_create,
-                pending_stats.files_update,
-                pending_stats.files_delete,
-                0, // files_skip - we don't skip in this implementation
-                pending_stats.dirs_create,
-                0, // dirs_update
-                0, // dirs_delete
-                0, // dirs_skip
-                pending_stats.size_create,
-                pending_stats.size_update,
-                pending_stats.size_delete,
-                0, // size_skip
-            );
+        if !options.no_progress {
+            if options.verbose >= 1 {
+                // Verbose mode: show detailed breakdown
+                let detailed_stats = self.calculate_detailed_pending_stats(&categorized, source_root);
+                formatted_display::print_pending_operations_detailed(
+                    &detailed_stats,
+                    options.verbose,
+                );
+            } else {
+                // Normal mode: show simple summary
+                let pending_stats = self.calculate_pending_stats(&categorized, source_root);
+                formatted_display::print_pending_operations(
+                    pending_stats.files_create,
+                    pending_stats.files_update,
+                    pending_stats.files_delete,
+                    0, // files_skip - we don't skip in this implementation
+                    pending_stats.dirs_create,
+                    0, // dirs_update
+                    0, // dirs_delete
+                    0, // dirs_skip
+                    pending_stats.size_create,
+                    pending_stats.size_update,
+                    pending_stats.size_delete,
+                    0, // size_skip
+                );
+            }
         }
 
         // Process directories first (must be done before files)
@@ -412,23 +423,25 @@ impl MixedStrategyExecutor {
             total_stats.bytes_transferred()
         };
 
-        if total_stats.files_deleted() > 0 {
-            println!(
-                "\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
-                elapsed.as_secs_f32(),
-                format_number(total_stats.files_copied()),
-                format_number(total_stats.files_deleted()),
-                humanize_bytes(total_stats.bytes_transferred()),
-                humanize_bytes(throughput)
-            );
-        } else {
-            println!(
-                "\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
-                elapsed.as_secs_f32(),
-                format_number(total_stats.files_copied()),
-                humanize_bytes(total_stats.bytes_transferred()),
-                humanize_bytes(throughput)
-            );
+        if !options.no_progress {
+            if total_stats.files_deleted() > 0 {
+                println!(
+                    "\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
+                    elapsed.as_secs_f32(),
+                    format_number(total_stats.files_copied()),
+                    format_number(total_stats.files_deleted()),
+                    humanize_bytes(total_stats.bytes_transferred()),
+                    humanize_bytes(throughput)
+                );
+            } else {
+                println!(
+                    "\n     ✅ Completed in {:.1}s: {} files copied, {} transferred ({}/s)",
+                    elapsed.as_secs_f32(),
+                    format_number(total_stats.files_copied()),
+                    humanize_bytes(total_stats.bytes_transferred()),
+                    humanize_bytes(throughput)
+                );
+            }
         }
 
         // Get metadata warning count

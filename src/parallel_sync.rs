@@ -401,9 +401,9 @@ impl ParallelSyncer {
                 }
             }
 
-            CopyStrategy::NativeRobocopy { extra_args: _ } => {
+            CopyStrategy::NativeRobocopy { extra_args } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
-                let _executor = NativeToolExecutor::new(options.dry_run);
+                let executor = NativeToolExecutor::new(options.dry_run);
 
                 #[cfg(target_os = "windows")]
                 {
@@ -587,7 +587,7 @@ impl ParallelSyncer {
         } else {
             if let Some(ref mp) = multi_progress {
                 let _ = mp.println("     📁 Destination directory doesn't exist - will be created");
-            } else if show_progress {
+            } else if show_progress && !options.no_progress {
                 println!("     📁 Destination directory doesn't exist - will be created");
             }
             Vec::new()
