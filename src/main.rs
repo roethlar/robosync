@@ -731,7 +731,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn test_get_max_thread_count_windows() {
         let max_threads = get_max_thread_count();
-        assert_eq!(max_threads, 128);
+        assert_eq!(max_threads, 256);
     }
 
     #[test]
