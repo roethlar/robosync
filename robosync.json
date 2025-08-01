@@ -1,0 +1,23 @@
+{
+    "version": "1.0.1",
+    "description": "High-performance file synchronization with intelligent concurrent processing",
+    "homepage": "https://github.com/roethlar/robosync",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/roethlar/robosync/releases/download/v1.0.1/robosync-1.0.1-x86_64-pc-windows-msvc.zip",
+            "hash": "058cab54cae4d17db7d64bba9f3d424e67718e7af7a9a9b5f15ae461ebe6a59a"
+        }
+    },
+    "bin": "robosync.exe",
+    "checkver": {
+        "github": "https://github.com/roethlar/robosync"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/roethlar/robosync/releases/download/v$version/robosync-x86_64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

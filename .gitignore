@@ -81,3 +81,4 @@ robosync-*.tar.gz
 # robosync.json (KEEP)
 # homebrew-submission-guide.md (KEEP)
 # package-submission-guide.md (KEEP)
+temp/

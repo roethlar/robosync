@@ -1,0 +1,24 @@
+name: robosync
+version: '1.0.0'
+summary: High-performance file synchronization
+description: |
+  RoboSync is a high-performance file synchronization tool that combines 
+  the best features of RoboCopy and rsync with modern Rust performance.
+
+base: core22
+confinement: classic
+grade: stable
+
+apps:
+  robosync:
+    command: bin/robosync
+
+parts:
+  robosync:
+    plugin: rust
+    source: .
+    build-packages:
+      - cargo
+      - rustc
+    stage-packages:
+      - libc6

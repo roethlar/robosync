@@ -1,0 +1,32 @@
+# Maintainer: Your Name <your.email@example.com>
+pkgname=robosync
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="High-performance file synchronization with intelligent concurrent processing"
+arch=('x86_64' 'aarch64')
+url="https://github.com/roethlar/robosync"
+license=('MIT')
+depends=()
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::https://crates.io/api/v1/crates/$pkgname/$pkgver/download")
+sha256sums=('637912396082d3f40490f8624c2b976a12cc87962984496050219a7dba826b30')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$srcdir/$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --all-features
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -1,8 +1,8 @@
 class Robosync < Formula
   desc "High-performance file synchronization with intelligent concurrent processing"
   homepage "https://github.com/roethlar/robosync"
-  url "https://github.com/roethlar/robosync/archive/refs/tags/v1.0.1.tar.gz"
-  sha256 "4a49d80e51eab73e7a26360a207a412e8ff930dd6fb0967322b2f2718ed3f956"
+  url "https://github.com/roethlar/robosync/archive/refs/tags/v1.0.3.tar.gz"
+  sha256 "c1ca167b6ae535afa4778e779e9b37f65e9f3519919d1cba5eade9ece1745f77"
   license "MIT"
   head "https://github.com/roethlar/robosync.git", branch: "main"
 
