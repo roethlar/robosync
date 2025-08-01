@@ -13,6 +13,7 @@ sha256sums=('cf22f06c324cd0c0d340c0aa13b607adf26c79f6eaeccf57c9513d47dcaa97bc')
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
+    export ZSTD_SYS_USE_PKG_CONFIG=1
     cargo build --release
 }
 
