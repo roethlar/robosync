@@ -91,3 +91,17 @@ build-releases.sh
 robosync.json
 robosync.nix
 ai-coordination.md
+HOMEBREW_SUBMISSION.md
+WINGET_SUBMISSION.md
+
+# AI coordination files
+*roboclaude*.md
+*TODO*.md
+*STATUS*.md
+URGENT_*.md
+
+# Package manager configs (keep local)
+*.nuspec
+roethlar.robosync*.yaml
+tools/
+winget-pkgs/
