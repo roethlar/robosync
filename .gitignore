@@ -56,10 +56,28 @@ release/
 *.tar.gz
 robosync
 
-# Temporary scripts
+# Temporary scripts  
 scripts/
+build_*.bat
+vs-installer-*.md
+
+# Test files that should NEVER be in root
+test_*
+*_test*
+perf_*
+quick_perf*
+np_test*
+mac_test*
+nul
+
+# Binary archives in root
+robosync-*.zip
+robosync-*.tar.gz
 
 # Keep package manager files - we still need these!
 # homebrew-formula-source.rb (KEEP)
+# homebrew-formula.rb (KEEP)
 # PKGBUILD (KEEP) 
 # robosync.json (KEEP)
+# homebrew-submission-guide.md (KEEP)
+# package-submission-guide.md (KEEP)
