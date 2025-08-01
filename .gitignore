@@ -27,7 +27,7 @@ grok.txt
 .claude/
 claude-suggestions.md
 lint_report.md
-CLAUDE.md
+# CLAUDE.md - KEEP THIS! Critical rules file
 LINTING_REPORT.md
 CRUSH.md
 GITHUB_READY.md
@@ -48,7 +48,7 @@ quick_perf*/
 np_test_*/
 
 # Coordination files (development artifacts)
-coordination/
+# coordination/
 
 # Build artifacts
 release/
@@ -74,11 +74,20 @@ nul
 robosync-*.zip
 robosync-*.tar.gz
 
-# Keep package manager files - we still need these!
-# homebrew-formula-source.rb (KEEP)
-# homebrew-formula.rb (KEEP)
-# PKGBUILD (KEEP) 
-# robosync.json (KEEP)
-# homebrew-submission-guide.md (KEEP)
-# package-submission-guide.md (KEEP)
+# Package manager files
+package-managers/
+homebrew-tap/
 temp/
+
+# Non-essential files
+aur-package/
+coordination/
+scripts/
+snap/
+BENCHMARKS.md
+TROUBLESHOOTING.md
+PERFORMANCE_OPTIMIZATIONS.md
+build-releases.sh
+robosync.json
+robosync.nix
+ai-coordination.md
