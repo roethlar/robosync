@@ -21,13 +21,16 @@ pub mod file_list;
 pub mod formatted_display;
 pub mod logging;
 pub mod metadata;
+pub mod metadata_utils;
 pub mod mixed_strategy;
 pub mod native_tools;
+pub mod operation_utils;
 pub mod options;
 pub mod parallel_sync;
 pub mod platform_api;
 pub mod progress;
 pub mod retry;
+pub mod streaming_delta;
 pub mod strategy;
 pub mod sync;
 pub mod sync_stats;
@@ -38,6 +41,9 @@ pub mod linux_fast_copy;
 
 #[cfg(target_os = "linux")]
 pub mod linux_parallel_sync;
+
+#[cfg(target_os = "windows")]
+pub mod windows_symlinks;
 
 pub use algorithm::DeltaAlgorithm;
 pub use checksum::ChecksumType;

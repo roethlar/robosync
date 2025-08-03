@@ -231,32 +231,8 @@ fn create_symlink_cross_platform(target: &Path, destination: &Path) -> Result<()
 
     #[cfg(windows)]
     {
-        // On Windows, we need to determine if the target is a directory or file
-        let target_path = if target.is_absolute() {
-            target.to_path_buf()
-        } else if let Some(parent) = destination.parent() {
-            parent.join(target)
-        } else {
-            target.to_path_buf()
-        };
-
-        if target_path.is_dir() {
-            std::os::windows::fs::symlink_dir(target, destination).with_context(|| {
-                format!(
-                    "Failed to create directory symlink: {} -> {}",
-                    destination.display(),
-                    target.display()
-                )
-            })?;
-        } else {
-            std::os::windows::fs::symlink_file(target, destination).with_context(|| {
-                format!(
-                    "Failed to create file symlink: {} -> {}",
-                    destination.display(),
-                    target.display()
-                )
-            })?;
-        }
+        // Use our comprehensive Windows symlink implementation
+        crate::windows_symlinks::create_symlink(destination, target)?;
     }
 
     Ok(())
@@ -706,11 +682,12 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
     use std::fs::File;
     use std::io::{Read, Write};
 
-    // Use much larger buffer for network transfers (32MB)
-    const NETWORK_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+    // Use smaller buffer for better compatibility with network file systems
+    const NETWORK_BUFFER_SIZE: usize = 1 * 1024 * 1024; // 1MB instead of 32MB
 
     let mut source_file = File::open(source)
         .with_context(|| format!("Failed to open source file: {}", source.display()))?;
+    
     let mut dest_file = File::create(destination).with_context(|| {
         format!(
             "Failed to create destination file: {}",
@@ -741,13 +718,14 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
             .with_context(|| {
                 format!("Failed to write to destination: {}", destination.display())
             })?;
-
         total_bytes += bytes_read as u64;
     }
 
-    dest_file
-        .sync_all()
-        .with_context(|| format!("Failed to sync destination: {}", destination.display()))?;
+    // Skip sync_all on network filesystems as it can hang
+    // The file data is already written, sync_all is just for durability
+    // dest_file
+    //     .sync_all()
+    //     .with_context(|| format!("Failed to sync destination: {}", destination.display()))?;
 
     Ok(total_bytes)
 }

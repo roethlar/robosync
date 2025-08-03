@@ -349,7 +349,7 @@ impl NativeToolExecutor {
         // Create default options
         let options = SyncOptions {
             dry_run: self.dry_run,
-            no_progress: progress_manager.is_none(),
+            show_progress: !progress_manager.is_none(),
             ..Default::default()
         };
 

@@ -21,6 +21,9 @@ deletion_test/
 *grok*.txt
 coordination.json
 grok.txt
+*Session_gemini*.json
+*_responses.txt
+*_suggestions.txt
 
 # Editor/AI assistant files
 .grok/
@@ -40,6 +43,7 @@ clippy.log
 
 # Error reports
 robosync_errors_*.txt
+robosync_errors_*.log
 
 # Test data and performance files
 perf_*/
@@ -99,6 +103,17 @@ WINGET_SUBMISSION.md
 *TODO*.md
 *STATUS*.md
 URGENT_*.md
+coordination/
+shared.json
+*gemini*.md
+*claude*.md
+ai-suggestions*.md
+*responses*.md
+
+# Benchmarks and examples (not essential for building)
+benches/
+examples/
+docs/
 
 # Package manager configs (keep local)
 *.nuspec

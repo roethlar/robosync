@@ -202,7 +202,7 @@ impl ParallelSyncer {
             })
             .sum();
 
-        let executor = if options.no_progress {
+        let executor = if !options.show_progress {
             MixedStrategyExecutor::new_with_no_progress()
         } else {
             MixedStrategyExecutor::new(total_files, total_bytes)
@@ -374,7 +374,7 @@ impl ParallelSyncer {
 
         // Create unified progress manager (but not for mixed modes which have their own)
         let use_mixed_mode = matches!(strategy, CopyStrategy::MixedMode);
-        let progress_manager = if options.no_progress || use_mixed_mode {
+        let progress_manager = if !options.show_progress || use_mixed_mode {
             None
         } else {
             Some(Arc::new(SyncProgress::new(
@@ -401,9 +401,9 @@ impl ParallelSyncer {
                 }
             }
 
-            CopyStrategy::NativeRobocopy { extra_args } => {
+            CopyStrategy::NativeRobocopy { extra_args: _extra_args } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
-                let executor = NativeToolExecutor::new(options.dry_run);
+                let _executor = NativeToolExecutor::new(options.dry_run);
 
                 #[cfg(target_os = "windows")]
                 {
@@ -484,7 +484,7 @@ impl ParallelSyncer {
                 let operations = self.collect_operations(&source, &destination, &options)?;
 
                 // Execute mixed strategy with simple progress
-                let executor = if options.no_progress {
+                let executor = if !options.show_progress {
                     MixedStrategyExecutor::new_with_no_progress()
                 } else {
                     MixedStrategyExecutor::new(
@@ -537,7 +537,7 @@ impl ParallelSyncer {
         let generator = FastFileListGenerator::new(enum_config);
 
         // Create MultiProgress to manage multiple spinners properly
-        let multi_progress = if show_progress && !options.no_progress {
+        let multi_progress = if show_progress && options.show_progress {
             Some(MultiProgress::new())
         } else {
             None
@@ -587,7 +587,7 @@ impl ParallelSyncer {
         } else {
             if let Some(ref mp) = multi_progress {
                 let _ = mp.println("     📁 Destination directory doesn't exist - will be created");
-            } else if show_progress && !options.no_progress {
+            } else if show_progress && options.show_progress {
                 println!("     📁 Destination directory doesn't exist - will be created");
             }
             Vec::new()
@@ -780,7 +780,7 @@ impl ParallelSyncer {
         let mut logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
 
         // Create MultiProgress for analysis phase - always use for scanning progress
-        let multi_progress = if options.no_progress {
+        let multi_progress = if !options.show_progress {
             None
         } else {
             // In indicatif 0.18, MultiProgress automatically handles rendering
@@ -884,7 +884,7 @@ impl ParallelSyncer {
         };
 
         // Analysis phase with progress indication
-        let mut operations = if !options.no_progress {
+        let mut operations = if options.show_progress {
             // Create a spinner to show analysis activity
             let pb = ProgressBar::new_spinner();
             pb.set_style(Self::create_progress_style(
@@ -920,7 +920,7 @@ impl ParallelSyncer {
 
         // Add purge operations if mirror or purge mode is enabled
         if options.purge || options.mirror {
-            if !options.no_progress {
+            if options.show_progress {
                 let pb = if let Some(ref mp) = multi_progress {
                     mp.add(ProgressBar::new_spinner())
                 } else {
@@ -1225,7 +1225,7 @@ impl ParallelSyncer {
         }
 
         // Create progress tracking - disable for -vv mode
-        let progress = if options.no_progress || options.verbose >= 2 {
+        let progress = if !options.show_progress || options.verbose >= 2 {
             None
         } else {
             // Create progress bar that works with MultiProgress for verbose mode compatibility
@@ -1640,13 +1640,14 @@ impl ParallelSyncer {
                                                     }
                                                     #[cfg(windows)]
                                                     {
-                                                        // On Windows, just skip symlinks for now
-                                                        if verbose >= 1 {
-                                                            println!(
-                                                                "Skipping symlink on Windows: {}",
-                                                                path.display()
-                                                            );
-                                                        }
+                                                        crate::windows_symlinks::create_symlink(&dest_path, &_target)
+                                                            .with_context(|| {
+                                                                format!(
+                                                                    "Failed to create symlink: {} -> {}",
+                                                                    dest_path.display(),
+                                                                    _target.display()
+                                                                )
+                                                            })?;
                                                     }
                                                 }
                                                 return Ok(());
@@ -2761,33 +2762,8 @@ impl ParallelSyncer {
 
         #[cfg(windows)]
         {
-            // On Windows, we need to determine if the target is a directory or file
-            // For relative paths, we need to resolve them relative to the symlink location
-            let target_path = if target.is_absolute() {
-                target.to_path_buf()
-            } else if let Some(parent) = destination.parent() {
-                parent.join(target)
-            } else {
-                target.to_path_buf()
-            };
-
-            if target_path.is_dir() {
-                std::os::windows::fs::symlink_dir(target, destination).with_context(|| {
-                    format!(
-                        "Failed to create directory symlink: {} -> {}",
-                        destination.display(),
-                        target.display()
-                    )
-                })?;
-            } else {
-                std::os::windows::fs::symlink_file(target, destination).with_context(|| {
-                    format!(
-                        "Failed to create file symlink: {} -> {}",
-                        destination.display(),
-                        target.display()
-                    )
-                })?;
-            }
+            // Use our comprehensive Windows symlink implementation
+            crate::windows_symlinks::create_symlink(destination, target)?;
         }
 
         Ok(())

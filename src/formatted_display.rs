@@ -405,6 +405,7 @@ pub fn create_progress_bar(total: u64) -> ProgressBar {
             .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("█▓░"),
     );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
     pb
 }
 

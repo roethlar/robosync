@@ -365,9 +365,8 @@ mod tests {
             &SyncOptions::default(),
         );
 
-        // Should choose native tools for many small files
-        #[cfg(unix)]
-        assert!(matches!(strategy, CopyStrategy::NativeRsync { .. }));
+        // Should choose mixed mode for many small files
+        assert!(matches!(strategy, CopyStrategy::MixedMode));
     }
 
     #[test]

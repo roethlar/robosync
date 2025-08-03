@@ -4,6 +4,7 @@ use crate::algorithm::{DeltaAlgorithm, Match};
 use crate::file_list::{
     FileOperation, compare_file_lists_with_roots, generate_file_list_with_options,
 };
+use crate::logging::SyncLogger;
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
 use anyhow::{Context, Result};
@@ -17,9 +18,12 @@ pub fn synchronize(
     _threads: usize,
     _compress: bool,
 ) -> Result<()> {
-    println!("Starting synchronization...");
-    println!("  Source: {}", source.display());
-    println!("  Destination: {}", destination.display());
+    // Create a logger without file output for basic sync
+    let logger = SyncLogger::new(None, false)?;
+    
+    logger.log("Starting synchronization...");
+    logger.log(&format!("  Source: {}", source.display()));
+    logger.log(&format!("  Destination: {}", destination.display()));
 
     // Create destination if it doesn't exist
     if !destination.exists() {
@@ -55,19 +59,20 @@ pub fn synchronize(
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("Source file has no name"))?;
         let dest_file = destination.join(file_name);
-        sync_single_file(&source, &dest_file)?;
+        sync_single_file(&source, &dest_file, &logger)?;
     } else if source_metadata.is_file() && (!destination.exists() || destination.is_file()) {
         // Single file to file (new file or existing file)
-        sync_single_file(&source, &destination)?;
+        sync_single_file(&source, &destination, &logger)?;
     } else if source_metadata.is_dir() {
         // Directory synchronization
         let default_options = SyncOptions::default();
-        sync_directories(&source, &destination, &default_options)?;
+        sync_directories(&source, &destination, &default_options, &logger)?;
     } else {
         return Err(anyhow::anyhow!("Invalid source/destination combination"));
     }
 
-    println!("Synchronization completed successfully!");
+    logger.log("Synchronization completed successfully!");
+    logger.close();
     Ok(())
 }
 
@@ -78,6 +83,9 @@ pub fn synchronize_with_options(
     _threads: usize,
     mut options: SyncOptions,
 ) -> Result<()> {
+    // Create logger with optional log file
+    let logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
+    
     // Detect destination filesystem capabilities and adjust copy flags if needed
     let dest_parent = if destination.exists() {
         destination.clone()
@@ -114,25 +122,25 @@ pub fn synchronize_with_options(
         if !filtered_out.is_empty() {
             match capabilities.filesystem_type {
                 crate::metadata::FilesystemType::Network => {
-                    println!(
+                    logger.log(
                         "Warning: Network filesystem detected. The following copy flags may fail and have been disabled:"
                     );
                 }
                 crate::metadata::FilesystemType::Tmpfs => {
-                    println!(
+                    logger.log(
                         "Warning: Temporary filesystem detected. The following copy flags may fail and have been disabled:"
                     );
                 }
                 _ => {
-                    println!(
+                    logger.log(
                         "Warning: Filesystem limitations detected. The following copy flags have been disabled:"
                     );
                 }
             }
             for flag in &filtered_out {
-                println!("  - {flag}");
+                logger.log(&format!("  - {flag}"));
             }
-            println!("Consider using -copyflags DAT for cross-filesystem copies.");
+            logger.log("Consider using -copyflags DAT for cross-filesystem copies.");
         }
 
         // Update options with filtered flags
@@ -158,9 +166,10 @@ pub fn synchronize_with_options(
     }
 
     if options.dry_run {
-        println!("DRY RUN - would synchronize:");
-        println!("  Source: {}", source.display());
-        println!("  Destination: {}", destination.display());
+        logger.log("DRY RUN - would synchronize:");
+        logger.log(&format!("  Source: {}", source.display()));
+        logger.log(&format!("  Destination: {}", destination.display()));
+        logger.close();
         return Ok(());
     }
 
@@ -173,28 +182,29 @@ pub fn synchronize_with_options(
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("Source file has no name"))?;
         let dest_file = destination.join(file_name);
-        sync_single_file(&source, &dest_file)?;
+        sync_single_file(&source, &dest_file, &logger)?;
     } else if source_metadata.is_file() && (!destination.exists() || destination.is_file()) {
         // Single file to file (new file or existing file)
-        sync_single_file(&source, &destination)?;
+        sync_single_file(&source, &destination, &logger)?;
     } else if source_metadata.is_dir() {
         // Directory synchronization
-        sync_directories(&source, &destination, &options)?;
+        sync_directories(&source, &destination, &options, &logger)?;
     } else {
         return Err(anyhow::anyhow!("Invalid source/destination combination"));
     }
 
-    println!("Synchronization completed successfully!");
+    logger.log("Synchronization completed successfully!");
+    logger.close();
     Ok(())
 }
 
 /// Synchronize a single file using delta algorithm
-fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
-    println!(
+fn sync_single_file(source: &Path, destination: &Path, logger: &SyncLogger) -> Result<()> {
+    logger.log(&format!(
         "Syncing file: {} -> {}",
         source.display(),
         destination.display()
-    );
+    ));
 
     let source_data = fs::read(source)
         .with_context(|| format!("Failed to read source file: {}", source.display()))?;
@@ -214,7 +224,7 @@ fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
             )
         })?;
 
-        println!("  Copied {} bytes (new file)", source_data.len());
+        logger.log(&format!("  Copied {} bytes (new file)", source_data.len()));
         return Ok(());
     }
 
@@ -255,9 +265,9 @@ fn sync_single_file(source: &Path, destination: &Path) -> Result<()> {
         .filter(|m| matches!(m, Match::Block { .. }))
         .count();
 
-    println!(
+    logger.log(&format!(
         "  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)"
-    );
+    ));
 
     Ok(())
 }
@@ -293,12 +303,12 @@ fn apply_delta(dest_data: &[u8], matches: &[Match]) -> Result<Vec<u8>> {
 }
 
 /// Synchronize directories recursively
-fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) -> Result<()> {
-    println!(
+fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions, logger: &SyncLogger) -> Result<()> {
+    logger.log(&format!(
         "Syncing directory: {} -> {}",
         source.display(),
         destination.display()
-    );
+    ));
 
     // Generate file lists
     let source_files = generate_file_list_with_options(source, options)
@@ -354,7 +364,7 @@ fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) ->
                 use_delta: true,
             } => {
                 let dest_path = map_source_to_dest(&path, source, destination)?;
-                sync_single_file(&path, &dest_path)?;
+                sync_single_file(&path, &dest_path, logger)?;
                 let file_size = fs::metadata(&path)?.len();
                 progress.update_file_complete(file_size);
             }
@@ -416,27 +426,7 @@ fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions) ->
                         path.parent().unwrap_or(Path::new(".")).join(&target)
                     };
 
-                    if target_path.is_dir() {
-                        std::os::windows::fs::symlink_dir(&target, &dest_path).with_context(
-                            || {
-                                format!(
-                                    "Failed to create directory symlink: {} -> {}",
-                                    dest_path.display(),
-                                    target.display()
-                                )
-                            },
-                        )?;
-                    } else {
-                        std::os::windows::fs::symlink_file(&target, &dest_path).with_context(
-                            || {
-                                format!(
-                                    "Failed to create file symlink: {} -> {}",
-                                    dest_path.display(),
-                                    target.display()
-                                )
-                            },
-                        )?;
-                    }
+                    crate::windows_symlinks::create_symlink(&dest_path, &target)?;
                 }
 
                 progress.update_file_complete(0);
@@ -537,33 +527,8 @@ fn create_symlink(target: &Path, destination: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        // On Windows, we need to determine if the target is a directory or file
-        // For relative paths, we need to resolve them relative to the symlink location
-        let target_path = if target.is_absolute() {
-            target.to_path_buf()
-        } else if let Some(parent) = destination.parent() {
-            parent.join(target)
-        } else {
-            target.to_path_buf()
-        };
-
-        if target_path.is_dir() {
-            std::os::windows::fs::symlink_dir(target, destination).with_context(|| {
-                format!(
-                    "Failed to create directory symlink: {} -> {}",
-                    destination.display(),
-                    target.display()
-                )
-            })?;
-        } else {
-            std::os::windows::fs::symlink_file(target, destination).with_context(|| {
-                format!(
-                    "Failed to create file symlink: {} -> {}",
-                    destination.display(),
-                    target.display()
-                )
-            })?;
-        }
+        // Use our comprehensive Windows symlink implementation
+        crate::windows_symlinks::create_symlink(destination, target)?;
     }
 
     Ok(())
@@ -583,7 +548,8 @@ mod tests {
 
         fs::write(&source, b"Hello, World!")?;
 
-        sync_single_file(&source, &dest)?;
+        let logger = SyncLogger::new(None, false)?;
+        sync_single_file(&source, &dest, &logger)?;
 
         let dest_content = fs::read(&dest)?;
         assert_eq!(dest_content, b"Hello, World!");

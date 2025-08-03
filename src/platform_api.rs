@@ -372,8 +372,9 @@ impl PlatformCopier {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to copy {source:?}: {e}");
-                    stats.increment_errors();
+                    // Don't print to stderr - it breaks the progress bar
+                    // Record error details for log file
+                    stats.add_error(source.clone(), "platform_copy", &e.to_string());
                 }
             }
         }

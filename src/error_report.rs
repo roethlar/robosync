@@ -16,7 +16,7 @@ pub struct ErrorReporter {
     error_count: Arc<Mutex<usize>>,
     warning_count: Arc<Mutex<usize>>,
     verbose: u8,
-    no_progress: bool,
+    show_progress: bool,
 }
 
 #[derive(Clone)]
@@ -28,25 +28,23 @@ struct ErrorEntry {
 
 impl ErrorReporter {
     /// Create a new error reporter
-    pub fn new(source: &Path, destination: &Path, options: &SyncOptions) -> Self {
-        // Create report filename with timestamp and sanitized paths
-        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-        let source_name = source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .replace('/', "_");
-        let dest_name = destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .replace('/', "_");
-
-        let report_filename = format!(
-            "robosync_errors_{timestamp}_{source_name}__to__{dest_name}.log"
-        );
-
-        let report_path = PathBuf::from(&report_filename);
+    pub fn new(_source: &Path, _destination: &Path, options: &SyncOptions) -> Self {
+        // Create report filename
+        let report_path = if let Some(ref log_file) = options.log_file {
+            // If --log is specified, create error file based on that name
+            let log_path = PathBuf::from(log_file);
+            let stem = log_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("log");
+            let extension = log_path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("log");
+            PathBuf::from(format!("{stem}_errors.{extension}"))
+        } else {
+            // Otherwise use timestamp-based name
+            let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+            PathBuf::from(format!("{timestamp}_robosync_errors.log"))
+        };
 
         let report_file = if options.no_report_errors {
             None
@@ -61,7 +59,7 @@ impl ErrorReporter {
             error_count: Arc::new(Mutex::new(0)),
             warning_count: Arc::new(Mutex::new(0)),
             verbose: options.verbose,
-            no_progress: options.no_progress,
+            show_progress: options.show_progress,
         }
     }
 
@@ -73,7 +71,7 @@ impl ErrorReporter {
             error_count: Arc::clone(&self.error_count),
             warning_count: Arc::clone(&self.warning_count),
             verbose: self.verbose,
-            no_progress: self.no_progress,
+            show_progress: self.show_progress,
         }
     }
 
@@ -209,7 +207,7 @@ pub struct ErrorReportHandle {
     error_count: Arc<Mutex<usize>>,
     warning_count: Arc<Mutex<usize>>,
     verbose: u8,
-    no_progress: bool,
+    show_progress: bool,
 }
 
 impl ErrorReportHandle {
@@ -242,7 +240,7 @@ impl ErrorReportHandle {
                     path.display(),
                     message
                 );
-            } else if !self.no_progress && *count % 10 == 0 {
+            } else if self.show_progress && *count % 10 == 0 {
                 // Only print count periodically if not verbose and progress is shown
                 eprintln!(
                     "  [{count}] errors encountered (details will be saved to report)"
@@ -284,7 +282,7 @@ impl ErrorReportHandle {
 
     /// Check if we should show progress bars
     pub fn should_show_progress(&self) -> bool {
-        // No progress bar with -vv or --no-progress
-        self.verbose < 2 && !self.no_progress
+        // Show progress bar with --progress (unless -vv)
+        self.verbose < 2 && self.show_progress
     }
 }

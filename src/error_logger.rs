@@ -8,6 +8,7 @@
 
 use crate::error_report::{ErrorReportHandle, ErrorReporter};
 use crate::options::SyncOptions;
+use crate::sync_stats::SyncStats;
 use anyhow::Result;
 use chrono::Local;
 use std::path::{Path, PathBuf};
@@ -57,17 +58,8 @@ impl ErrorLogger {
             handle.add_error(path, &full_message);
         }
 
-        // Print to console if verbose >= 1
-        if self.options.verbose >= 1 {
-            let timestamp = Local::now().format("%H:%M:%S");
-            eprintln!(
-                "[{}] Error {}: {} - {}",
-                timestamp,
-                operation,
-                path.display(),
-                message
-            );
-        }
+        // Never print errors to console during execution - they break the progress bar
+        // Errors are always saved to the error report file
 
         // Log operation if verbose >= 2
         if self.options.verbose >= 2 {
@@ -88,17 +80,8 @@ impl ErrorLogger {
             handle.add_warning(path, &full_message);
         }
 
-        // Print to console if verbose >= 1
-        if self.options.verbose >= 1 {
-            let timestamp = Local::now().format("%H:%M:%S");
-            eprintln!(
-                "[{}] Warning {}: {} - {}",
-                timestamp,
-                operation,
-                path.display(),
-                message
-            );
-        }
+        // Never print warnings to console during execution - they break the progress bar
+        // Warnings are always saved to the error report file
 
         // Log operation if verbose >= 2
         if self.options.verbose >= 2 {
@@ -131,13 +114,46 @@ impl ErrorLogger {
 
     /// Should we display progress bars?
     pub fn should_show_progress(&self) -> bool {
-        // No progress bar with -vv or --no-progress
-        self.options.verbose < 2 && !self.options.no_progress
+        // Show progress bar with --progress (unless -vv)
+        self.options.verbose < 2 && self.options.show_progress
     }
 
     /// Write the error report file if needed
     pub fn finalize(&self) -> Result<Option<PathBuf>> {
         if let Some(ref reporter) = self.error_reporter {
+            reporter.write_report()
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Write the error report file with details from SyncStats
+    pub fn finalize_with_stats(&self, stats: &SyncStats) -> Result<Option<PathBuf>> {
+        if let Some(ref reporter) = self.error_reporter {
+            // Add all error details from SyncStats to the error reporter
+            for error_detail in stats.get_error_details() {
+                reporter.add_error(&error_detail.path, &format!("{}: {}", error_detail.operation, error_detail.message));
+            }
+            
+            // Add all structured errors from SyncStats
+            // Add all structured errors from SyncStats
+            for structured_error in stats.get_structured_errors() {
+                // Extract path from error if available
+                let path = match &structured_error.error {
+                    crate::error::RoboSyncError::Io { path: Some(p), .. } => p.clone(),
+                    crate::error::RoboSyncError::Permission { path, .. } => path.clone(),
+                    crate::error::RoboSyncError::NotFound { path } => path.clone(),
+                    crate::error::RoboSyncError::SyncFailed { source_path: Some(p), .. } => p.clone(),
+                    crate::error::RoboSyncError::SyncFailed { dest_path: Some(p), .. } => p.clone(),
+                    crate::error::RoboSyncError::DeltaFailed { file_path, .. } => file_path.clone(),
+                    crate::error::RoboSyncError::ChecksumMismatch { path, .. } => path.clone(),
+                    crate::error::RoboSyncError::PatternError { path: Some(p), .. } => p.clone(),
+                    _ => PathBuf::from("unknown"),
+                };
+                
+                reporter.add_error(&path, &format!("{}: {}", structured_error.context, structured_error.error));
+            }
+            
             reporter.write_report()
         } else {
             Ok(None)
@@ -178,17 +194,8 @@ impl ErrorLogHandle {
             handle.add_error(path, &full_message);
         }
 
-        // Print to console if verbose >= 1
-        if self.verbose >= 1 {
-            let timestamp = Local::now().format("%H:%M:%S");
-            eprintln!(
-                "[{}] Error {}: {} - {}",
-                timestamp,
-                operation,
-                path.display(),
-                message
-            );
-        }
+        // Never print errors to console during execution - they break the progress bar
+        // Errors are always saved to the error report file
 
         // Log operation if verbose >= 2
         if self.verbose >= 2 {
@@ -209,17 +216,8 @@ impl ErrorLogHandle {
             handle.add_warning(path, &full_message);
         }
 
-        // Print to console if verbose >= 1
-        if self.verbose >= 1 {
-            let timestamp = Local::now().format("%H:%M:%S");
-            eprintln!(
-                "[{}] Warning {}: {} - {}",
-                timestamp,
-                operation,
-                path.display(),
-                message
-            );
-        }
+        // Never print warnings to console during execution - they break the progress bar
+        // Warnings are always saved to the error report file
 
         // Log operation if verbose >= 2
         if self.verbose >= 2 {

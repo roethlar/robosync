@@ -2,6 +2,59 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.6] - 2025-08-03
+
+### Fixed
+- Error report files are now correctly generated when errors occur during synchronization
+- Fixed merge_stats function to properly propagate error details from worker threads
+- Errors are now properly logged to log files when using --log flag
+- Fixed hanging issue on network filesystems by removing sync_all() call
+
+### Added
+- --debug flag for controlling debug output (infrastructure in place for future use)
+- Automatic error report generation with detailed error information
+- Error logging to log files shows file operations and errors with -v flag
+
+### Changed
+- Removed all debug print statements from normal operation
+- Improved error tracking and reporting across worker threads
+- Logger is now properly passed to mixed strategy executor
+
+## [1.0.5] - 2025-08-02
+
+### Fixed
+- Critical hanging issue in single file operations due to missing parent directory creation
+- Single file operations now properly create parent directories before copying
+- Progress bars now update smoothly with steady tick enabled
+
+### Added
+- Utility modules for cleaner code organization (metadata_utils, operation_utils)
+- Windows symlink support module for future enhancement
+- Consolidated progress reporting system across all sync strategies
+
+### Changed
+- Refactored file operations to use centralized utility functions
+- Improved error handling and reporting consistency
+- Cleaned up repository by removing non-essential files per CLAUDE.md guidelines
+
+## [1.0.4] - 2025-08-02
+
+### Fixed
+- Fixed out of memory error in delta transfer by implementing streaming algorithm
+- Delta transfer now processes files of any size without loading them into memory
+- Integrated ErrorLogger into mixed strategy for automatic error reporting
+- Error reports are now automatically saved to timestamped log files when errors occur
+
+### Added
+- New streaming delta transfer implementation that processes files in chunks
+- Streaming checksums generation for destination files
+- Memory-efficient delta reconstruction without full file loads
+
+### Changed
+- Delta transfer algorithm completely rewritten to use streaming I/O
+- No more file size limitations for delta transfer
+- Improved memory usage for large file synchronization
+
 ## [1.0.0] - 2025-07-31
 
 ### 🎉 First Stable Release!

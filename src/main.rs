@@ -5,7 +5,7 @@ use robosync::color_output::ConditionalColor;
 use std::path::PathBuf;
 
 use robosync::compression::CompressionConfig;
-use robosync::options::{SymlinkBehavior, SyncOptions};
+use robosync::options::{load_config, SymlinkBehavior, SyncOptions};
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 use robosync::sync;
 
@@ -210,9 +210,10 @@ fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
-            Arg::new("no-progress")
-                .long("np")
-                .help("No progress - don't display percentage copied")
+            Arg::new("progress")
+                .short('p')
+                .long("progress")
+                .help("Show progress bar with percentage copied")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
@@ -231,6 +232,12 @@ fn main() -> Result<()> {
             Arg::new("eta")
                 .long("eta")
                 .help("Show estimated time of arrival and progress updates")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("debug")
+                .long("debug")
+                .help("Enable debug logging output")
                 .action(clap::ArgAction::SetTrue)
         )
 
@@ -273,6 +280,29 @@ fn main() -> Result<()> {
                 .value_name("SIZE")
                 .help("Block size for delta algorithm in bytes (default: 1024). Smaller blocks find more matches but use more CPU/memory. Larger blocks are faster but may transfer more data.")
                 .value_parser(clap::value_parser!(usize))
+        )
+        
+        // File size threshold options
+        .arg(
+            Arg::new("small-file-threshold")
+                .long("small-threshold")
+                .value_name("SIZE")
+                .help("Size threshold for small files in bytes (default: 262144 / 256KB). Files up to this size use parallel batch processing.")
+                .value_parser(clap::value_parser!(u64))
+        )
+        .arg(
+            Arg::new("medium-file-threshold")
+                .long("medium-threshold")
+                .value_name("SIZE")
+                .help("Size threshold for medium files in bytes (default: 10485760 / 10MB). Files up to this size use platform-specific APIs.")
+                .value_parser(clap::value_parser!(u64))
+        )
+        .arg(
+            Arg::new("large-file-threshold")
+                .long("large-threshold")
+                .value_name("SIZE")
+                .help("Size threshold for large files in bytes (default: 104857600 / 100MB). Files above this use delta transfer.")
+                .value_parser(clap::value_parser!(u64))
         )
 
         // Legacy rsync options
@@ -324,7 +354,8 @@ fn main() -> Result<()> {
         Arg::new("linux-optimized")
             .long("linux-optimized")
             .help("Enable Linux-specific optimizations for small files")
-            .action(clap::ArgAction::SetTrue),
+            .action(clap::ArgAction::SetTrue)
+            .hide(true),
     );
 
     #[cfg(not(target_os = "linux"))]
@@ -334,7 +365,8 @@ fn main() -> Result<()> {
         Arg::new("no-smart")
             .long("no-smart")
             .help("Diagnostic: use basic parallel mode instead of mixed mode")
-            .action(clap::ArgAction::SetTrue),
+            .action(clap::ArgAction::SetTrue)
+            .hide(true),
     );
 
     let matches = matches.arg(
@@ -343,6 +375,7 @@ fn main() -> Result<()> {
                 .value_name("METHOD")
                 .help("Diagnostic override: force a specific strategy (delta, mixed, rsync, robocopy, platform)")
                 .value_parser(["delta", "mixed", "rsync", "robocopy", "platform", "io_uring", "parallel"])
+                .hide(true),
         );
 
     let matches = matches
@@ -365,6 +398,9 @@ fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
+
+    // Load config from .robosync.toml if it exists
+    let config = load_config()?.unwrap_or_default();
 
     // For regular sync operations, source and destination are required
     let source_arg: PathBuf = matches
@@ -394,10 +430,11 @@ fn main() -> Result<()> {
     let verbose = matches.get_count("verbose");
     let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
-    let no_progress = matches.get_flag("no-progress");
+    let show_progress = matches.get_flag("progress");
     let no_report_errors = matches.get_flag("no-report-errors");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
+    let debug = matches.get_flag("debug");
     let no_smart = matches.get_flag("no-smart");
     let _smart_mode = !no_smart; // Smart mode is now default (unused but kept for clarity)
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
@@ -451,13 +488,21 @@ fn main() -> Result<()> {
         .unwrap_or_default()
         .cloned()
         .collect();
-    let exclude_dirs: Vec<String> = matches
+    let mut exclude_dirs: Vec<String> = matches
         .get_many::<String>("exclude-dirs")
         .unwrap_or_default()
         .cloned()
         .collect();
+    if let Some(config_exclude_dirs) = config.exclude_dirs {
+        exclude_dirs.extend(config_exclude_dirs);
+    }
     let min_size = matches.get_one::<u64>("min-size").copied();
     let max_size = matches.get_one::<u64>("max-size").copied();
+    
+    // File size thresholds
+    let small_file_threshold = matches.get_one::<u64>("small-file-threshold").copied();
+    let medium_file_threshold = matches.get_one::<u64>("medium-file-threshold").copied();
+    let large_file_threshold = matches.get_one::<u64>("large-file-threshold").copied();
 
     // Copy flags
     let copy_flags = matches
@@ -472,6 +517,7 @@ fn main() -> Result<()> {
     let threads = matches
         .get_one::<usize>("threads")
         .copied()
+        .or(config.threads)
         .unwrap_or(num_cpus);
     let block_size = matches
         .get_one::<usize>("block-size")
@@ -499,7 +545,7 @@ fn main() -> Result<()> {
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
     // Print header without lines
-    if !no_progress {
+    if !show_progress {
         println!(
             "     {} v{}: {}",
             "RoboSync".color_bold_if(Color::Cyan),
@@ -566,7 +612,7 @@ fn main() -> Result<()> {
     let _table_width = max_len.max(44) + 2; // At least 44 chars, plus padding
 
     // Display configuration
-    if !no_progress {
+    if !show_progress {
         println!();
         println!(
             "     {}  {}",
@@ -603,7 +649,7 @@ fn main() -> Result<()> {
         dry_run,
         verbose,
         confirm,
-        no_progress,
+        show_progress,
         move_files,
         exclude_files,
         exclude_dirs,
@@ -630,6 +676,10 @@ fn main() -> Result<()> {
         forced_strategy,
         symlink_behavior,
         no_report_errors,
+        debug,
+        small_file_threshold,
+        medium_file_threshold,
+        large_file_threshold,
     };
 
     if !dry_run {

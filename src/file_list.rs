@@ -1129,6 +1129,9 @@ mod tests {
             forced_strategy: None,
             symlink_behavior: crate::options::SymlinkBehavior::Preserve,
             no_report_errors: false,
+            small_file_threshold: None,
+            medium_file_threshold: None,
+            large_file_threshold: None,
             #[cfg(target_os = "linux")]
             linux_optimized: false,
         };

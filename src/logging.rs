@@ -55,9 +55,7 @@ impl SyncLogger {
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
                 let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                if let Err(e) = writeln!(writer, "[{timestamp}] {message}") {
-                    eprintln!("Warning: Failed to write to log file: {e}");
-                }
+                let _ = writeln!(writer, "[{timestamp}] {message}");
                 // Flush immediately to ensure log is written
                 let _ = writer.flush();
             }
@@ -66,14 +64,11 @@ impl SyncLogger {
 
     /// Log an error message
     pub fn log_error(&self, error: &str) {
-        eprintln!("ERROR: {error}");
-
+        // Don't print to stderr - errors are collected and shown at the end
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
                 let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                if let Err(e) = writeln!(writer, "[{timestamp}] ERROR: {error}") {
-                    eprintln!("Warning: Failed to write to log file: {e}");
-                }
+                let _ = writeln!(writer, "[{timestamp}] ERROR: {error}");
                 let _ = writer.flush();
             }
         }
@@ -87,6 +82,17 @@ impl SyncLogger {
         if self.show_eta && self.total_files > 0 {
             let progress_message = self.generate_progress_message();
             self.log(&progress_message);
+        }
+    }
+    
+    /// Log current file being processed
+    pub fn log_file_operation(&self, operation: &str, path: &str) {
+        if let Some(ref log_file) = self.log_file {
+            if let Ok(mut writer) = log_file.lock() {
+                let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+                let _ = writeln!(writer, "[{timestamp}] {operation}: {path}");
+                let _ = writer.flush();
+            }
         }
     }
 
