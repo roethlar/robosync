@@ -83,6 +83,9 @@ package-managers/
 homebrew-tap/
 temp/
 
+# Chat logs
+chatlog.txt
+
 # Non-essential files
 aur-package/
 coordination/
