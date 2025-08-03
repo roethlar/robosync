@@ -42,10 +42,33 @@ RoboSync combines the battle-tested reliability of RoboCopy and rsync with moder
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- **Rust 1.70+** (for building from source or cargo install)
+- **Zstandard library** (libzstd) - for compression support
+
 ### Installation
 
+#### From Package Managers
+
 ```bash
-# Build from source (recommended)
+# Arch Linux (AUR) - using yay
+yay -S robosync
+
+# Arch Linux (AUR) - using paru
+paru -S robosync
+
+# Using Rust's Cargo
+cargo install robosync
+
+# Update to latest version
+cargo install --force robosync
+```
+
+#### Build from Source
+
+```bash
+# Clone and build
 git clone https://github.com/roethlar/robosync.git
 cd robosync
 cargo build --release

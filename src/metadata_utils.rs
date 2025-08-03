@@ -7,7 +7,9 @@ use std::fs::Metadata;
 use std::path::Path;
 use anyhow::Result;
 
-use crate::metadata::{CopyFlags, copy_timestamps, copy_permissions, copy_attributes, copy_ownership};
+use crate::metadata::{CopyFlags, copy_timestamps, copy_permissions, copy_attributes};
+#[cfg(unix)]
+use crate::metadata::copy_ownership;
 
 /// Apply all metadata based on copy flags in the correct order
 /// 
@@ -34,6 +36,7 @@ pub fn apply_metadata_from_flags(
         copy_attributes(source, destination, source_metadata)?;
     }
     
+    #[cfg(unix)]
     if copy_flags.owner {
         copy_ownership(source, destination, source_metadata)?;
     }

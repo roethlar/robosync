@@ -420,7 +420,7 @@ fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions, lo
                 {
                     // On Windows, we need to check if the target is a directory or file
                     // to use the appropriate symlink function
-                    let target_path = if target.is_absolute() {
+                    let _target_path = if target.is_absolute() {
                         target.clone()
                     } else {
                         path.parent().unwrap_or(Path::new(".")).join(&target)

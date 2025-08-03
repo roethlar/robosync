@@ -64,14 +64,14 @@ impl FastFileListGenerator {
 
     /// Generate file list with fast enumeration
     pub fn generate_file_list(&self, root: &Path, options: &SyncOptions) -> Result<Vec<FileInfo>> {
-        let start_time = Instant::now();
+        let _start_time = Instant::now();
 
         // Starting fast file enumeration
 
         // Use platform-optimized implementation if available
         #[cfg(target_os = "linux")]
         if let Ok(files) = self.generate_with_jwalk(root, options) {
-            let _elapsed = start_time.elapsed();
+            let _elapsed = _start_time.elapsed();
             // Fast enumeration completed
             return Ok(files);
         }

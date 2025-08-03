@@ -1,5 +1,5 @@
 /target
-Cargo.lock
+# Cargo.lock - KEEP for binary crates!
 *.bak
 .DS_Store
 .vscode/
@@ -70,7 +70,7 @@ vs-installer-*.md
 test_*
 *_test*
 perf_*
-quick_perf*
+quick_perf_*
 np_test*
 mac_test*
 nul
@@ -92,9 +92,9 @@ aur-package/
 coordination/
 scripts/
 snap/
-BENCHMARKS.md
-TROUBLESHOOTING.md
-PERFORMANCE_OPTIMIZATIONS.md
+# BENCHMARKS.md - might be useful for users
+# TROUBLESHOOTING.md - might be useful for users
+# PERFORMANCE_OPTIMIZATIONS.md - might be useful for users
 build-releases.sh
 robosync.json
 robosync.nix
@@ -116,10 +116,10 @@ ai-suggestions*.md
 RELEASE_*.md
 *_RELEASE*.md
 
-# Benchmarks and examples (not essential for building)
-benches/
-examples/
-docs/
+# Benchmarks and examples - KEEP THESE, they're part of the crate!
+# benches/
+# examples/
+# docs/
 
 # Package manager configs (keep local)
 *.nuspec

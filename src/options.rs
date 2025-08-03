@@ -52,7 +52,6 @@ pub fn load_config() -> Result<Option<Config>> {
         PathBuf::from("robosync.toml"),
     ];
     
-    #[cfg(unix)]
     if let Some(config_dir) = dirs::config_dir() {
         config_paths.push(config_dir.join("robosync/robosync.toml"));
     }
