@@ -696,7 +696,16 @@ fn main() -> Result<()> {
             if let Some(ref strategy) = sync_options.forced_strategy {
                 println!("     Diagnostic mode: using {strategy} strategy");
             }
-            let _stats = syncer.synchronize_smart(source, destination, sync_options)?;
+            let stats = syncer.synchronize_smart(source, destination, sync_options.clone())?;
+            
+            // Print summary statistics when not using progress bar or verbose mode
+            if !sync_options.show_progress && sync_options.verbose == 0 {
+                println!("\nSummary:");
+                println!("  Files copied: {}", stats.files_copied());
+                println!("  Files deleted: {}", stats.files_deleted());
+                println!("  Bytes transferred: {}", stats.bytes_transferred());
+                println!("  Errors: {}", stats.errors());
+            }
         } else {
             // Default: mixed mode (optimal for all scenarios)
             // Force mixed mode in sync options and use smart mode infrastructure
@@ -711,7 +720,16 @@ fn main() -> Result<()> {
             };
 
             let syncer = ParallelSyncer::new(config);
-            let _stats = syncer.synchronize_smart(source, destination, mixed_options)?;
+            let stats = syncer.synchronize_smart(source, destination, mixed_options)?;
+            
+            // Print summary statistics when not using progress bar or verbose mode
+            if !sync_options.show_progress && sync_options.verbose == 0 {
+                println!("\nSummary:");
+                println!("  Files copied: {}", stats.files_copied());
+                println!("  Files deleted: {}", stats.files_deleted());
+                println!("  Bytes transferred: {}", stats.bytes_transferred());
+                println!("  Errors: {}", stats.errors());
+            }
         }
     } else {
         // Dry run mode

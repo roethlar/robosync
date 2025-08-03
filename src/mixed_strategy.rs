@@ -545,6 +545,7 @@ impl MixedStrategyExecutor {
         // Finish the internal progress tracker to prevent any final output
         self.progress.finish();
 
+        
         // Final summary
         let elapsed = start_time.elapsed();
         let throughput = if elapsed.as_secs() > 0 {
@@ -553,7 +554,9 @@ impl MixedStrategyExecutor {
             total_stats.bytes_transferred()
         };
 
+        // Always print summary statistics
         if options.show_progress {
+            // With progress bar, show fancy completion message
             if total_stats.files_deleted() > 0 {
                 println!(
                     "\n     ✅ Completed in {:.1}s: {} files copied, {} deleted, {} transferred ({}/s)",
@@ -574,24 +577,25 @@ impl MixedStrategyExecutor {
             }
         }
 
-        // Log final statistics
+        // Log final statistics to file only (not console)
         {
             let logger = logger.lock().unwrap();
-            logger.log(&format!("Files copied: {}", total_stats.files_copied()));
-            logger.log(&format!("Files deleted: {}", total_stats.files_deleted()));
-            logger.log(&format!("Bytes transferred: {}", total_stats.bytes_transferred()));
-            logger.log(&format!("Errors: {}", total_stats.errors()));
+            logger.log_to_file_only(&format!("Files copied: {}", total_stats.files_copied()));
+            logger.log_to_file_only(&format!("Files deleted: {}", total_stats.files_deleted()));
+            logger.log_to_file_only(&format!("Bytes transferred: {}", total_stats.bytes_transferred()));
+            logger.log_to_file_only(&format!("Errors: {}", total_stats.errors()));
             
             // Log error details
             let error_details = total_stats.get_error_details();
-            logger.log(&format!("Error details count: {}", error_details.len()));
+            logger.log_to_file_only(&format!("Error details count: {}", error_details.len()));
             for error_detail in error_details {
-                logger.log(&format!("ERROR: {} - {} - {}", 
+                logger.log_to_file_only(&format!("ERROR: {} - {} - {}", 
                     error_detail.path.display(), 
                     error_detail.operation, 
                     error_detail.message));
             }
         }
+        
         
         // Finalize error reporting before printing summary
         let error_report_path = if let Ok(report_path) = error_logger.finalize_with_stats(&total_stats) {
@@ -599,6 +603,7 @@ impl MixedStrategyExecutor {
         } else {
             None
         };
+        
 
         // Get metadata warning count
         let warning_count = crate::metadata::get_and_reset_metadata_warning_count();
@@ -628,6 +633,7 @@ impl MixedStrategyExecutor {
         
         // Close the logger
         logger.lock().unwrap().close();
+        
         
         Ok(total_stats)
     }

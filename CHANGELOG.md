@@ -2,6 +2,18 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.7] - 2025-08-03
+
+### Fixed
+- Fixed output alignment issue when running without -v or -p flags
+- Removed duplicate unformatted statistics output that appeared after synchronization
+- Summary statistics now display with proper formatting and indentation
+
+### Changed
+- Added log_to_file_only method to SyncLogger for file-only logging
+- Final statistics are now only logged to file, not printed to console
+- Improved output consistency across different flag combinations
+
 ## [1.0.6] - 2025-08-03
 
 ### Fixed

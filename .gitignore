@@ -59,6 +59,7 @@ release/
 *.zip
 *.tar.gz
 robosync
+*.crate
 
 # Temporary scripts  
 scripts/
@@ -112,6 +113,8 @@ shared.json
 *claude*.md
 ai-suggestions*.md
 *responses*.md
+RELEASE_*.md
+*_RELEASE*.md
 
 # Benchmarks and examples (not essential for building)
 benches/

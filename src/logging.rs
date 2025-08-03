@@ -73,6 +73,17 @@ impl SyncLogger {
             }
         }
     }
+    
+    /// Log a message to file only (not to console)
+    pub fn log_to_file_only(&self, message: &str) {
+        if let Some(ref log_file) = self.log_file {
+            if let Ok(mut writer) = log_file.lock() {
+                let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+                let _ = writeln!(writer, "[{timestamp}] {message}");
+                let _ = writer.flush();
+            }
+        }
+    }
 
     /// Update progress and optionally show ETA
     pub fn update_progress(&mut self, files_delta: u64, bytes_delta: u64) {
