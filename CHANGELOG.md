@@ -2,6 +2,13 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.8] - 2025-08-03
+
+### Fixed
+- Fixed summary statistics alignment to use consistent 5-space indentation
+- Summary statistics now display correctly with verbose (-v) flag
+- All output lines now have consistent alignment matching the header style
+
 ## [1.0.7] - 2025-08-03
 
 ### Fixed
