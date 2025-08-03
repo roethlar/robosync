@@ -3,8 +3,8 @@
 //! This module contains the modern implementation of rsync's delta-transfer algorithm,
 //! based on the rolling checksum approach from the original match.c
 
-use crate::checksum::{ChecksumType, RollingChecksum, get_checksum1, strong_checksum};
-use crate::compression::{CompressionConfig, compress_literal_data};
+use crate::checksum::{get_checksum1, strong_checksum, ChecksumType, RollingChecksum};
+use crate::compression::{compress_literal_data, CompressionConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 

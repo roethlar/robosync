@@ -17,38 +17,36 @@ pub fn print_header(
     exclude: &[String],
     options: &str,
 ) {
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
-    println!(
-        "     RoboSync {version}: Fast parallel file synchronization"
-    );
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    println!("───────────────────────────────────────────────────────────────────────────────");
+    println!("RoboSync {version}: Fast parallel file synchronization");
+    println!("───────────────────────────────────────────────────────────────────────────────");
 
     // Calculate max width for proper alignment
     let max_len = source.len().max(dest.len()).max(50);
 
-    println!("    ╭────────┬{}╮", "─".repeat(max_len + 2));
-    println!("    │ Source │ {source:<max_len$} │");
-    println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
-    println!("    │ Dest   │ {dest:<max_len$} │");
+    println!("╭────────┬{}╮", "─".repeat(max_len + 2));
+    println!("│ Source │ {source:<max_len$} │");
+    println!("├────────┼{}┤", "─".repeat(max_len + 2));
+    println!("│ Dest   │ {dest:<max_len$} │");
 
     if !include.is_empty() && include != "*.*" {
-        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
-        println!("    │ Incl.  │ {include:<max_len$} │");
+        println!("├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("│ Incl.  │ {include:<max_len$} │");
     }
 
     if !exclude.is_empty() {
         let exclude_str = exclude.join(" ");
-        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
-        println!("    │ Excl.  │ {exclude_str:<max_len$} │");
+        println!("├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("│ Excl.  │ {exclude_str:<max_len$} │");
     }
 
     if !options.is_empty() {
-        println!("    ├────────┼{}┤", "─".repeat(max_len + 2));
-        println!("    │ Options│ {options:<max_len$} │");
+        println!("├────────┼{}┤", "─".repeat(max_len + 2));
+        println!("│ Options│ {options:<max_len$} │");
     }
 
-    println!("    └────────┴{}┘", "─".repeat(max_len + 2));
-    println!("  ───────────────────────────────────────────────────────────────────────────────");
+    println!("└────────┴{}┘", "─".repeat(max_len + 2));
+    println!("───────────────────────────────────────────────────────────────────────────────");
 }
 
 /// Display file analysis results
@@ -62,13 +60,10 @@ pub fn print_file_analysis(
     medium_size: u64,
     large_size: u64,
 ) {
-    println!(
-        "\n     {}",
-        "File Analysis Complete:".color_bold_if(Color::Cyan)
-    );
+    println!("\n{}", "File Analysis Complete:".color_bold_if(Color::Cyan));
     println!();
     println!(
-        "     {}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+        "{}  {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
         "Files:".color_if(Color::White),
         format_number(total_files).color_bold_if(Color::White),
         "total".color_if(Color::White),
@@ -80,7 +75,7 @@ pub fn print_file_analysis(
         "large".color_if(Color::Red)
     );
     println!(
-        "     {}   {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
+        "{}   {:>8} {}   ({:>8} {}, {:>7} {}, {:>3} {})",
         "Size:".color_if(Color::White),
         format_bytes(total_size).color_bold_if(Color::White),
         "total".color_if(Color::White),
@@ -112,85 +107,76 @@ pub fn print_pending_operations(
     let _dirs_total = dirs_create + dirs_update + dirs_delete + dirs_skip;
     let _size_total = size_create + size_update + size_delete + size_skip;
 
-    println!(
-        "\n     {}",
-        "Pending Operations:".color_bold_if(Color::Cyan)
-    );
+    println!("\n{}", "Pending Operations:".color_bold_if(Color::Cyan));
     println!();
 
     // Simple list format - much cleaner
     if files_create > 0 {
         println!(
-            "     Files to create: {}",
+            "Files to create: {}",
             format_number(files_create).color_if(Color::Green)
         );
     }
     if files_update > 0 {
         println!(
-            "     Files to update: {}",
+            "Files to update: {}",
             format_number(files_update).color_if(Color::Yellow)
         );
     }
     if files_delete > 0 {
         println!(
-            "     Files to delete: {}",
+            "Files to delete: {}",
             format_number(files_delete).color_if(Color::Red)
         );
     }
     if dirs_create > 0 {
         println!(
-            "     Directories to create: {}",
+            "Directories to create: {}",
             format_number(dirs_create).color_if(Color::Green)
         );
     }
     if dirs_delete > 0 {
         println!(
-            "     Directories to delete: {}",
+            "Directories to delete: {}",
             format_number(dirs_delete).color_if(Color::Red)
         );
     }
 
     let total_operations = files_create + files_update + files_delete + dirs_create + dirs_delete;
     println!(
-        "\n     Total: {} operations, {} transfer size",
+        "\nTotal: {} operations, {} transfer size",
         format_number(total_operations).color_bold_if(Color::White),
         format_bytes_short(size_create + size_update).color_bold_if(Color::White)
     );
 }
 
 /// Display pending operations with detailed breakdown (verbose mode)
-pub fn print_pending_operations_detailed(
-    stats: &DetailedPendingStats,
-    _verbose_level: u8,
-) {
-    println!(
-        "\n     {}",
-        "Pending Operations:".color_bold_if(Color::Cyan)
-    );
+pub fn print_pending_operations_detailed(stats: &DetailedPendingStats, _verbose_level: u8) {
+    println!("\n{}", "Pending Operations:".color_bold_if(Color::Cyan));
     println!();
 
     // Files to create with breakdown
     if stats.basic.files_create > 0 {
         println!(
-            "     Files to create: {}",
+            "Files to create: {}",
             format_number(stats.basic.files_create).color_if(Color::Green)
         );
-        print_size_breakdown(&stats.create_breakdown, "       ");
+        print_size_breakdown(&stats.create_breakdown, "");
     }
 
     // Files to update with breakdown
     if stats.basic.files_update > 0 {
         println!(
-            "     Files to update: {}",
+            "Files to update: {}",
             format_number(stats.basic.files_update).color_if(Color::Yellow)
         );
-        print_size_breakdown(&stats.update_breakdown, "       ");
+        print_size_breakdown(&stats.update_breakdown, "");
     }
 
     // Files to delete (no breakdown needed)
     if stats.basic.files_delete > 0 {
         println!(
-            "     Files to delete: {}",
+            "Files to delete: {}",
             format_number(stats.basic.files_delete).color_if(Color::Red)
         );
     }
@@ -198,27 +184,33 @@ pub fn print_pending_operations_detailed(
     // Directories to create
     if stats.basic.dirs_create > 0 {
         println!(
-            "     Directories to create: {}",
+            "Directories to create: {}",
             format_number(stats.basic.dirs_create).color_if(Color::Green)
         );
     }
 
     // Total summary
-    let total_operations = stats.basic.files_create + stats.basic.files_update + 
-                          stats.basic.files_delete + stats.basic.dirs_create;
-    
+    let total_operations = stats.basic.files_create
+        + stats.basic.files_update
+        + stats.basic.files_delete
+        + stats.basic.dirs_create;
+
     // Calculate actual transfer size considering delta optimization
-    let actual_transfer = stats.create_breakdown.small_size + stats.create_breakdown.medium_size +
-                         stats.create_breakdown.large_size + stats.create_breakdown.delta_actual +
-                         stats.update_breakdown.small_size + stats.update_breakdown.medium_size +
-                         stats.update_breakdown.large_size + stats.update_breakdown.delta_actual;
-    
+    let actual_transfer = stats.create_breakdown.small_size
+        + stats.create_breakdown.medium_size
+        + stats.create_breakdown.large_size
+        + stats.create_breakdown.delta_actual
+        + stats.update_breakdown.small_size
+        + stats.update_breakdown.medium_size
+        + stats.update_breakdown.large_size
+        + stats.update_breakdown.delta_actual;
+
     let total_file_size = stats.basic.size_create + stats.basic.size_update;
-    
+
     if total_file_size > actual_transfer {
         let saved = total_file_size - actual_transfer;
         println!(
-            "\n     Total: {} operations, {} file size ({} delta optimized to {})",
+            "\nTotal: {} operations, {} file size ({} delta optimized to {})",
             format_number(total_operations).color_bold_if(Color::White),
             format_bytes_short(total_file_size).color_bold_if(Color::White),
             format_bytes_short(saved).color_if(Color::Green),
@@ -226,7 +218,7 @@ pub fn print_pending_operations_detailed(
         );
     } else {
         println!(
-            "\n     Total: {} operations, {} transfer size",
+            "\nTotal: {} operations, {} transfer size",
             format_number(total_operations).color_bold_if(Color::White),
             format_bytes_short(actual_transfer).color_bold_if(Color::White)
         );
@@ -234,37 +226,34 @@ pub fn print_pending_operations_detailed(
 }
 
 /// Helper to print size breakdown
-fn print_size_breakdown(breakdown: &SizeBreakdown, indent: &str) {
+fn print_size_breakdown(breakdown: &SizeBreakdown, _indent: &str) {
     if breakdown.small_count > 0 {
         println!(
-            "{}Small:  {:>6} files, {:>8}",
-            indent,
+            "Small:  {:>6} files, {:>8}",
             format_number(breakdown.small_count).color_if(Color::Green),
             format_bytes_short(breakdown.small_size)
         );
     }
     if breakdown.medium_count > 0 {
         println!(
-            "{}Medium: {:>6} files, {:>8}",
-            indent,
+            "Medium: {:>6} files, {:>8}",
             format_number(breakdown.medium_count).color_if(Color::Yellow),
             format_bytes_short(breakdown.medium_size)
         );
     }
     if breakdown.large_count > 0 {
         println!(
-            "{}Large:  {:>6} files, {:>8}",
-            indent,
+            "Large:  {:>6} files, {:>8}",
             format_number(breakdown.large_count).color_if(Color::Red),
             format_bytes_short(breakdown.large_size)
         );
     }
     if breakdown.delta_count > 0 {
         if breakdown.delta_actual < breakdown.delta_size {
-            let percent = (breakdown.delta_actual as f64 / breakdown.delta_size as f64 * 100.0) as u64;
+            let percent =
+                (breakdown.delta_actual as f64 / breakdown.delta_size as f64 * 100.0) as u64;
             println!(
-                "{}Delta:  {:>6} files, {:>8} (~{}% change, ~{} delta)",
-                indent,
+                "Delta:  {:>6} files, {:>8} (~{}% change, ~{} delta)",
                 format_number(breakdown.delta_count).color_if(Color::Cyan),
                 format_bytes_short(breakdown.delta_size),
                 percent,
@@ -272,8 +261,7 @@ fn print_size_breakdown(breakdown: &SizeBreakdown, indent: &str) {
             );
         } else {
             println!(
-                "{}Delta:  {:>6} files, {:>8}",
-                indent,
+                "Delta:  {:>6} files, {:>8}",
                 format_number(breakdown.delta_count).color_if(Color::Cyan),
                 format_bytes_short(breakdown.delta_size)
             );
@@ -288,10 +276,10 @@ pub fn print_sync_summary(
     skipped_dirs: u64,
     skipped_size: u64,
 ) {
-    println!("\n     {}", "Sync Summary:".color_bold_if(Color::Cyan));
+    println!("\n{}", "Sync Summary:".color_bold_if(Color::Cyan));
     println!();
     println!(
-        "     {:>6} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "{:>6} {:>8} {:>8} {:>8} {:>8} {:>9}",
         "",
         "Copied".color_if(Color::White),
         "Updated".color_if(Color::White),
@@ -300,11 +288,11 @@ pub fn print_sync_summary(
         "Skipped".color_if(Color::White)
     );
     println!(
-        "     {:>6} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "{:>6} {:>8} {:>8} {:>8} {:>8} {:>9}",
         "──────", "────────", "────────", "────────", "────────", "─────────"
     );
     println!(
-        "     Files  {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "Files  {:>8} {:>8} {:>8} {:>8} {:>9}",
         format_number(stats.files_copied()),
         "0", // Updated tracked separately in our case
         format_number(stats.files_deleted()),
@@ -312,7 +300,7 @@ pub fn print_sync_summary(
         format_number(skipped_files)
     );
     println!(
-        "     Dirs   {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "Dirs   {:>8} {:>8} {:>8} {:>8} {:>9}",
         "0", // Dir stats not tracked separately
         "0",
         "0",
@@ -320,7 +308,7 @@ pub fn print_sync_summary(
         format_number(skipped_dirs)
     );
     println!(
-        "     Size   {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "Size   {:>8} {:>8} {:>8} {:>8} {:>9}",
         format_bytes_short(stats.bytes_transferred()),
         "0 B",
         "0 B",
@@ -335,10 +323,7 @@ pub fn print_worker_performance(mut workers: Vec<WorkerStats>) {
         return;
     }
 
-    println!(
-        "\n     {}",
-        "Worker Performance:".color_bold_if(Color::Cyan)
-    );
+    println!("\n{}", "Worker Performance:".color_bold_if(Color::Cyan));
     println!();
 
     // Sort workers to match the order in pending operations: Small, Medium, Large, Delta
@@ -375,7 +360,7 @@ pub fn print_worker_performance(mut workers: Vec<WorkerStats>) {
         };
 
         println!(
-            "     {}: {} files, {} in {:.1}s ({}/s)",
+            "{}: {} files, {} in {:.1}s ({}/s)",
             worker.name.as_str().color_if(worker_color),
             format_number(worker.files).color_if(Color::White),
             format_bytes_short(worker.bytes).color_if(Color::White),
@@ -401,7 +386,7 @@ pub fn create_progress_bar(total: u64) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("  [{bar:40}] {pos}/{len} | {msg}")
+            .template("[{bar:40}] {pos}/{len} | {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("█▓░"),
     );

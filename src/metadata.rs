@@ -135,9 +135,8 @@ pub fn copy_file_with_metadata_and_reporter(
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
-                let msg = format!(
-                    "Failed to preserve ownership: {e} (requires appropriate privileges)"
-                );
+                let msg =
+                    format!("Failed to preserve ownership: {e} (requires appropriate privileges)");
                 if let Some(reporter) = error_reporter {
                     reporter.add_warning(destination, &msg);
                 }
@@ -687,7 +686,7 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
 
     let mut source_file = File::open(source)
         .with_context(|| format!("Failed to open source file: {}", source.display()))?;
-    
+
     let mut dest_file = File::create(destination).with_context(|| {
         format!(
             "Failed to create destination file: {}",

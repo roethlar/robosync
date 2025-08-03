@@ -2,6 +2,17 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.9] - 2025-08-03
+
+### Changed
+- Simplified output alignment by removing all leading spaces for consistent left alignment
+- All output messages now start at column 0 for better maintainability
+- Progress bar now correctly displays throughput (MB/s, GB/s) instead of just files/s
+
+### Fixed
+- Fixed inconsistent indentation between different output sections
+- Fixed alignment issues in mixed strategy and parallel sync output
+
 ## [1.0.8] - 2025-08-03
 
 ### Fixed

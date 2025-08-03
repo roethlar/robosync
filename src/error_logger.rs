@@ -126,15 +126,18 @@ impl ErrorLogger {
             Ok(None)
         }
     }
-    
+
     /// Write the error report file with details from SyncStats
     pub fn finalize_with_stats(&self, stats: &SyncStats) -> Result<Option<PathBuf>> {
         if let Some(ref reporter) = self.error_reporter {
             // Add all error details from SyncStats to the error reporter
             for error_detail in stats.get_error_details() {
-                reporter.add_error(&error_detail.path, &format!("{}: {}", error_detail.operation, error_detail.message));
+                reporter.add_error(
+                    &error_detail.path,
+                    &format!("{}: {}", error_detail.operation, error_detail.message),
+                );
             }
-            
+
             // Add all structured errors from SyncStats
             // Add all structured errors from SyncStats
             for structured_error in stats.get_structured_errors() {
@@ -143,17 +146,25 @@ impl ErrorLogger {
                     crate::error::RoboSyncError::Io { path: Some(p), .. } => p.clone(),
                     crate::error::RoboSyncError::Permission { path, .. } => path.clone(),
                     crate::error::RoboSyncError::NotFound { path } => path.clone(),
-                    crate::error::RoboSyncError::SyncFailed { source_path: Some(p), .. } => p.clone(),
-                    crate::error::RoboSyncError::SyncFailed { dest_path: Some(p), .. } => p.clone(),
+                    crate::error::RoboSyncError::SyncFailed {
+                        source_path: Some(p),
+                        ..
+                    } => p.clone(),
+                    crate::error::RoboSyncError::SyncFailed {
+                        dest_path: Some(p), ..
+                    } => p.clone(),
                     crate::error::RoboSyncError::DeltaFailed { file_path, .. } => file_path.clone(),
                     crate::error::RoboSyncError::ChecksumMismatch { path, .. } => path.clone(),
                     crate::error::RoboSyncError::PatternError { path: Some(p), .. } => p.clone(),
                     _ => PathBuf::from("unknown"),
                 };
-                
-                reporter.add_error(&path, &format!("{}: {}", structured_error.context, structured_error.error));
+
+                reporter.add_error(
+                    &path,
+                    &format!("{}: {}", structured_error.context, structured_error.error),
+                );
             }
-            
+
             reporter.write_report()
         } else {
             Ok(None)

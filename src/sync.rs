@@ -2,7 +2,7 @@
 
 use crate::algorithm::{DeltaAlgorithm, Match};
 use crate::file_list::{
-    FileOperation, compare_file_lists_with_roots, generate_file_list_with_options,
+    compare_file_lists_with_roots, generate_file_list_with_options, FileOperation,
 };
 use crate::logging::SyncLogger;
 use crate::options::SyncOptions;
@@ -20,7 +20,7 @@ pub fn synchronize(
 ) -> Result<()> {
     // Create a logger without file output for basic sync
     let logger = SyncLogger::new(None, false)?;
-    
+
     logger.log("Starting synchronization...");
     logger.log(&format!("  Source: {}", source.display()));
     logger.log(&format!("  Destination: {}", destination.display()));
@@ -85,7 +85,7 @@ pub fn synchronize_with_options(
 ) -> Result<()> {
     // Create logger with optional log file
     let logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
-    
+
     // Detect destination filesystem capabilities and adjust copy flags if needed
     let dest_parent = if destination.exists() {
         destination.clone()
@@ -303,7 +303,12 @@ fn apply_delta(dest_data: &[u8], matches: &[Match]) -> Result<Vec<u8>> {
 }
 
 /// Synchronize directories recursively
-fn sync_directories(source: &Path, destination: &Path, options: &SyncOptions, logger: &SyncLogger) -> Result<()> {
+fn sync_directories(
+    source: &Path,
+    destination: &Path,
+    options: &SyncOptions,
+    logger: &SyncLogger,
+) -> Result<()> {
     logger.log(&format!(
         "Syncing directory: {} -> {}",
         source.display(),

@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
-use io_uring::{IoUring, opcode, types};
+use io_uring::{opcode, types, IoUring};
 
 /// Threshold for what we consider a "small file"
 const SMALL_FILE_THRESHOLD: usize = 64 * 1024; // 64KB

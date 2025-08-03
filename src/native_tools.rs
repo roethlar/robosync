@@ -3,7 +3,7 @@
 //! This module provides a unified interface to native file copying tools,
 //! handling their execution, progress parsing, and error handling.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -264,9 +264,7 @@ impl NativeToolExecutor {
         match wrapper.execute(source, destination) {
             Ok(stats) => Ok(stats),
             Err(e) => {
-                eprintln!(
-                    "Warning: rsync failed ({e}), falling back to built-in implementation"
-                );
+                eprintln!("Warning: rsync failed ({e}), falling back to built-in implementation");
                 self.fallback_to_builtin(source, destination, progress_manager_clone)
             }
         }

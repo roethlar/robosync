@@ -4,11 +4,11 @@
 //! without memory exhaustion.
 
 use crate::algorithm::BlockChecksum;
-use crate::checksum::{ChecksumType, get_checksum1, strong_checksum};
+use crate::checksum::{get_checksum1, strong_checksum, ChecksumType};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16MB chunks for processing
@@ -40,39 +40,42 @@ impl StreamingDelta {
         while offset < file_size {
             let bytes_to_read = std::cmp::min(self.block_size, (file_size - offset) as usize);
             reader.read_exact(&mut buffer[..bytes_to_read])?;
-            
+
             // Report progress on large files
-            if file_size > 100 * 1024 * 1024 && last_progress.elapsed() >= std::time::Duration::from_secs(2) {
-                eprint!("\r      Checksum generation: {:.1}% ({}/{} MB)",
+            if file_size > 100 * 1024 * 1024
+                && last_progress.elapsed() >= std::time::Duration::from_secs(2)
+            {
+                eprint!(
+                    "\r      Checksum generation: {:.1}% ({}/{} MB)",
                     (offset as f64 / file_size as f64) * 100.0,
                     offset / (1024 * 1024),
                     file_size / (1024 * 1024)
                 );
                 last_progress = std::time::Instant::now();
             }
-            
+
             let rolling_checksum = get_checksum1(&buffer[..bytes_to_read]);
             let strong_checksum = strong_checksum(&buffer[..bytes_to_read], self.checksum_type)?;
-            
+
             let mut strong_hash = [0u8; 32];
             let copy_len = std::cmp::min(strong_checksum.len(), 32);
             strong_hash[..copy_len].copy_from_slice(&strong_checksum[..copy_len]);
-            
+
             checksums.push(BlockChecksum {
                 offset,
                 rolling_checksum,
                 strong_checksum: strong_hash,
                 length: bytes_to_read,
             });
-            
+
             offset += bytes_to_read as u64;
         }
-        
+
         // Clear the progress line if we showed any progress
         if file_size > 100 * 1024 * 1024 {
             eprint!("\r                                                                      \r");
         }
-        
+
         Ok(checksums)
     }
 
@@ -96,25 +99,26 @@ impl StreamingDelta {
         let source_file = File::open(source_path)?;
         let source_size = source_file.metadata()?.len();
         let mut source_reader = BufReader::new(source_file);
-        
+
         let dest_file = File::open(dest_path)?;
         let mut dest_reader = BufReader::new(dest_file);
-        
+
         let temp_file = File::create(temp_path)?;
         let mut writer = BufWriter::new(temp_file);
-        
+
         let mut transferred_bytes = 0u64;
         let mut source_offset = 0u64;
-        
+
         let mut lookahead_buffer = vec![0u8; CHUNK_SIZE];
         let mut last_progress_report = std::time::Instant::now();
         let report_interval = std::time::Duration::from_secs(5);
-        
+
         while source_offset < source_size {
             let bytes_to_read = std::cmp::min(CHUNK_SIZE, (source_size - source_offset) as usize);
             source_reader.read_exact(&mut lookahead_buffer[..bytes_to_read])?;
-            
-            let (matches, non_match_len) = self.find_all_matches(&lookahead_buffer[..bytes_to_read], &hash_table, checksums)?;
+
+            let (matches, non_match_len) =
+                self.find_all_matches(&lookahead_buffer[..bytes_to_read], &hash_table, checksums)?;
 
             if !matches.is_empty() {
                 // Process all matches found in the lookahead buffer
@@ -144,10 +148,11 @@ impl StreamingDelta {
                 }
 
                 source_offset += bytes_to_read as u64;
-                
+
                 // Report progress periodically for large files
                 if last_progress_report.elapsed() >= report_interval {
-                    eprintln!("      Delta progress: {:.1}% ({}/{} MB processed, {} MB transferred)",
+                    eprintln!(
+                        "      Delta progress: {:.1}% ({}/{} MB processed, {} MB transferred)",
                         (source_offset as f64 / source_size as f64) * 100.0,
                         source_offset / (1024 * 1024),
                         source_size / (1024 * 1024),
@@ -155,7 +160,6 @@ impl StreamingDelta {
                     );
                     last_progress_report = std::time::Instant::now();
                 }
-
             } else if non_match_len > 0 {
                 // No matches found in the entire lookahead buffer, write as a literal.
                 writer.write_all(&lookahead_buffer[..non_match_len])?;
@@ -166,7 +170,7 @@ impl StreamingDelta {
                 break;
             }
         }
-        
+
         writer.flush()?;
         Ok(transferred_bytes)
     }
@@ -183,7 +187,7 @@ impl StreamingDelta {
         while current_offset + self.block_size <= buffer.len() {
             let window = &buffer[current_offset..current_offset + self.block_size];
             let rolling_checksum = get_checksum1(window);
-            
+
             if let Some(indices) = hash_table.get(&rolling_checksum) {
                 let strong_hash = strong_checksum(window, self.checksum_type)?;
                 let mut found_match_in_block = false;
@@ -197,11 +201,13 @@ impl StreamingDelta {
                             let next_window = &buffer[next_offset..next_offset + self.block_size];
                             let next_rolling_checksum = get_checksum1(next_window);
                             if let Some(next_indices) = hash_table.get(&next_rolling_checksum) {
-                                let next_strong_hash = strong_checksum(next_window, self.checksum_type)?;
+                                let next_strong_hash =
+                                    strong_checksum(next_window, self.checksum_type)?;
                                 let mut found_consecutive = false;
                                 for &next_block_index in next_indices {
                                     let next_block_checksum = &checksums[next_block_index];
-                                    if next_strong_hash[..32] == next_block_checksum.strong_checksum {
+                                    if next_strong_hash[..32] == next_block_checksum.strong_checksum
+                                    {
                                         consecutive_blocks.push(next_block_index);
                                         next_offset += self.block_size;
                                         found_consecutive = true;
@@ -233,13 +239,9 @@ impl StreamingDelta {
                 current_offset += std::cmp::min(self.block_size / 4, 1024).max(1);
             }
         }
-        
-        let non_match_len = if matches.is_empty() {
-            buffer.len()
-        } else {
-            0
-        };
-        
+
+        let non_match_len = if matches.is_empty() { buffer.len() } else { 0 };
+
         Ok((matches, non_match_len))
     }
 }

@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use robosync::file_list::generate_file_list_with_options;
 use robosync::options::SyncOptions;
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};

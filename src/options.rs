@@ -51,7 +51,7 @@ pub fn load_config() -> Result<Option<Config>> {
         PathBuf::from(".robosync.toml"),
         PathBuf::from("robosync.toml"),
     ];
-    
+
     if let Some(config_dir) = dirs::config_dir() {
         config_paths.push(config_dir.join("robosync/robosync.toml"));
     }
@@ -99,7 +99,7 @@ pub struct SyncOptions {
     pub no_report_errors: bool,
     pub debug: bool,
     // shimmer_model_path removed - AI features moved to separate project
-    
+
     // Configurable file size thresholds
     pub small_file_threshold: Option<u64>,
     pub medium_file_threshold: Option<u64>,

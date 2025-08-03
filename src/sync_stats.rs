@@ -1,10 +1,10 @@
 //! Synchronization statistics tracking
 
+use crate::error::RoboSyncError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::error::RoboSyncError;
 
 /// Error detail for tracking what went wrong
 #[derive(Clone, Debug)]
@@ -89,7 +89,7 @@ impl SyncStats {
             });
         }
     }
-    
+
     /// Add structured error that preserves the error type
     pub fn add_structured_error(&self, error: RoboSyncError, context: impl Into<String>) {
         self.increment_errors();
@@ -108,7 +108,7 @@ impl SyncStats {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    
+
     /// Get all structured errors (drains the vector)
     pub fn get_structured_errors(&self) -> Vec<StructuredError> {
         self.structured_errors

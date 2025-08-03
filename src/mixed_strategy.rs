@@ -8,16 +8,18 @@
 
 use anyhow::Result;
 use rayon::prelude::*;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::io::Write;
 
 use crate::error::RoboSyncError;
 use crate::error_logger::ErrorLogger;
 use crate::file_list::FileOperation;
 use crate::formatted_display::{self, WorkerStats};
 use crate::logging::SyncLogger;
-use crate::operation_utils::{prepare_destination_path, update_progress, update_progress_with_file};
+use crate::operation_utils::{
+    prepare_destination_path, update_progress, update_progress_with_file,
+};
 use crate::options::SyncOptions;
 use crate::platform_api::PlatformCopier;
 use crate::progress::SyncProgress;
@@ -90,7 +92,7 @@ impl MixedStrategyExecutor {
             logger: None,
         }
     }
-    
+
     pub fn with_logger(mut self, logger: Arc<Mutex<SyncLogger>>) -> Self {
         self.logger = Some(logger);
         self
@@ -104,24 +106,27 @@ impl MixedStrategyExecutor {
         dest_root: &Path,
         options: &SyncOptions,
     ) -> Result<SyncStats> {
+        use indicatif::{ProgressBar, ProgressStyle};
         use std::collections::HashMap;
         use std::sync::mpsc;
         use std::thread;
-        use indicatif::{ProgressBar, ProgressStyle};
-        
+
         // Create logger with optional log file
-        let logger = Arc::new(Mutex::new(SyncLogger::new(options.log_file.as_deref(), options.show_eta)?));
-        
+        let logger = Arc::new(Mutex::new(SyncLogger::new(
+            options.log_file.as_deref(),
+            options.show_eta,
+        )?));
+
         {
             let logger_guard = logger.lock().unwrap();
             logger_guard.log("Starting mixed strategy synchronization...");
-            logger_guard.log(&format!("  Source: {}", source_root.display()));
-            logger_guard.log(&format!("  Destination: {}", dest_root.display()));
+            logger_guard.log(&format!("Source: {}", source_root.display()));
+            logger_guard.log(&format!("Destination: {}", dest_root.display()));
         }
-        
+
         // Update self with the logger for worker threads
         let executor_with_logger = self.clone().with_logger(Arc::clone(&logger));
-        
+
         // Create error logger for automatic error reporting
         let error_logger = ErrorLogger::new(options.clone(), source_root, dest_root);
         let _error_handle = error_logger.get_handle();
@@ -132,7 +137,7 @@ impl MixedStrategyExecutor {
             s.set_style(
                 ProgressStyle::default_spinner()
                     .template("{spinner} {msg}")
-                    .expect("Failed to set spinner template")
+                    .expect("Failed to set spinner template"),
             );
             s.set_message("Analyzing files for optimal strategy...");
             s.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -144,7 +149,7 @@ impl MixedStrategyExecutor {
         // Categorize files by size and type
         let categorized = self.categorize_operations(operations, options);
         let operation_count = categorized.total_operations();
-        
+
         if let Some(spinner) = spinner {
             spinner.finish_and_clear();
         }
@@ -166,14 +171,16 @@ impl MixedStrategyExecutor {
         if options.show_progress {
             if options.verbose >= 1 {
                 // Verbose mode: show detailed breakdown
-                let detailed_stats = executor_with_logger.calculate_detailed_pending_stats(&categorized, source_root);
+                let detailed_stats = executor_with_logger
+                    .calculate_detailed_pending_stats(&categorized, source_root);
                 formatted_display::print_pending_operations_detailed(
                     &detailed_stats,
                     options.verbose,
                 );
             } else {
                 // Normal mode: show simple summary
-                let pending_stats = executor_with_logger.calculate_pending_stats(&categorized, source_root);
+                let pending_stats =
+                    executor_with_logger.calculate_pending_stats(&categorized, source_root);
                 formatted_display::print_pending_operations(
                     pending_stats.files_create,
                     pending_stats.files_update,
@@ -192,7 +199,11 @@ impl MixedStrategyExecutor {
         }
 
         // Process directories first (must be done before files)
-        executor_with_logger.create_directories(&categorized.directories, source_root, dest_root)?;
+        executor_with_logger.create_directories(
+            &categorized.directories,
+            source_root,
+            dest_root,
+        )?;
 
         // Clear any previous progress output before starting main progress bar
         if options.show_progress {
@@ -319,7 +330,7 @@ impl MixedStrategyExecutor {
                         st,
                     )
                 });
-                
+
                 let stats = match result {
                     Ok(stats_result) => stats_result,
                     Err(panic) => {
@@ -327,7 +338,7 @@ impl MixedStrategyExecutor {
                         Err(anyhow::anyhow!("Large worker thread panicked"))
                     }
                 };
-                
+
                 if let Err(e) = tx.send(("large", stats, worker_start.elapsed())) {
                     eprintln!("[ERROR] Failed to send large worker results: {:?}", e);
                 }
@@ -393,7 +404,7 @@ impl MixedStrategyExecutor {
                 let result = std::panic::catch_unwind(|| {
                     executor.process_deletes(&deletes, &options, Some(&pb_clone), st)
                 });
-                
+
                 let stats = match result {
                     Ok(stats_result) => stats_result,
                     Err(panic) => {
@@ -401,7 +412,7 @@ impl MixedStrategyExecutor {
                         Err(anyhow::anyhow!("Delete worker thread panicked"))
                     }
                 };
-                
+
                 if let Err(e) = tx.send(("delete", stats, worker_start.elapsed())) {
                     eprintln!("[ERROR] Failed to send delete worker results: {:?}", e);
                 }
@@ -421,12 +432,12 @@ impl MixedStrategyExecutor {
                     let mut last_rate = 0.0;
                     let spinner_chars = vec!['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                     let mut spinner_idx = 0;
-                    
+
                     loop {
                         thread::sleep(std::time::Duration::from_millis(100));
                         let current_position = pb_status.position();
                         let elapsed = start_time.elapsed();
-                        
+
                         // Calculate rate
                         let elapsed_secs = elapsed.as_secs_f64();
                         let rate = if elapsed_secs > 0.0 && current_position > 0 {
@@ -434,7 +445,7 @@ impl MixedStrategyExecutor {
                         } else {
                             0.0
                         };
-                        
+
                         // Check for stalls
                         if current_position == last_position {
                             stall_count += 1;
@@ -442,25 +453,34 @@ impl MixedStrategyExecutor {
                             stall_count = 0;
                             last_rate = rate;
                         }
-                        
+
                         // Update spinner
                         spinner_idx = (spinner_idx + 1) % spinner_chars.len();
-                        
+
                         // Print status line
-                        let status = if stall_count > 50 { // 5 seconds
-                            format!(" {} Syncing: {}/{} files | {:.1} files/s | ⚠️  Stalled for {}s",
-                                    spinner_chars[spinner_idx], current_position, total_ops, last_rate, stall_count / 10)
+                        let status = if stall_count > 50 {
+                            // 5 seconds
+                            format!(
+                                " {} Syncing: {}/{} files | {:.1} files/s | ⚠️  Stalled for {}s",
+                                spinner_chars[spinner_idx],
+                                current_position,
+                                total_ops,
+                                last_rate,
+                                stall_count / 10
+                            )
                         } else {
-                            format!(" {} Syncing: {}/{} files | {:.1} files/s",
-                                    spinner_chars[spinner_idx], current_position, total_ops, rate)
+                            format!(
+                                " {} Syncing: {}/{} files | {:.1} files/s",
+                                spinner_chars[spinner_idx], current_position, total_ops, rate
+                            )
                         };
-                        
+
                         // Clear line and print status
                         print!("\r{:80}\r{}", "", status);
                         let _ = std::io::stdout().flush();
-                        
+
                         last_position = current_position;
-                        
+
                         // Check if we're done
                         if current_position >= total_ops || pb_status.is_finished() {
                             print!("\r{:80}\r", ""); // Clear the line
@@ -511,13 +531,12 @@ impl MixedStrategyExecutor {
                     // Record structured error for log file
                     let robosync_err = RoboSyncError::operation_failed(
                         format!("{}_worker", worker_type),
-                        e.to_string()
+                        e.to_string(),
                     );
                     total_stats.add_structured_error(robosync_err, "worker_thread");
                 }
             }
         }
-        
 
         // Wait for all threads to complete
         for handle in handles {
@@ -531,7 +550,7 @@ impl MixedStrategyExecutor {
             // Even for hidden progress bars, we need to finish them
             pb.finish();
         }
-        
+
         // Wait for logger thread to finish
         if let Some(handle) = logger_handle {
             let _ = handle.join();
@@ -545,7 +564,6 @@ impl MixedStrategyExecutor {
         // Finish the internal progress tracker to prevent any final output
         self.progress.finish();
 
-        
         // Final summary
         let elapsed = start_time.elapsed();
         let throughput = if elapsed.as_secs() > 0 {
@@ -582,28 +600,32 @@ impl MixedStrategyExecutor {
             let logger = logger.lock().unwrap();
             logger.log_to_file_only(&format!("Files copied: {}", total_stats.files_copied()));
             logger.log_to_file_only(&format!("Files deleted: {}", total_stats.files_deleted()));
-            logger.log_to_file_only(&format!("Bytes transferred: {}", total_stats.bytes_transferred()));
+            logger.log_to_file_only(&format!(
+                "Bytes transferred: {}",
+                total_stats.bytes_transferred()
+            ));
             logger.log_to_file_only(&format!("Errors: {}", total_stats.errors()));
-            
+
             // Log error details
             let error_details = total_stats.get_error_details();
             logger.log_to_file_only(&format!("Error details count: {}", error_details.len()));
             for error_detail in error_details {
-                logger.log_to_file_only(&format!("ERROR: {} - {} - {}", 
-                    error_detail.path.display(), 
-                    error_detail.operation, 
-                    error_detail.message));
+                logger.log_to_file_only(&format!(
+                    "ERROR: {} - {} - {}",
+                    error_detail.path.display(),
+                    error_detail.operation,
+                    error_detail.message
+                ));
             }
         }
-        
-        
+
         // Finalize error reporting before printing summary
-        let error_report_path = if let Ok(report_path) = error_logger.finalize_with_stats(&total_stats) {
-            report_path
-        } else {
-            None
-        };
-        
+        let error_report_path =
+            if let Ok(report_path) = error_logger.finalize_with_stats(&total_stats) {
+                report_path
+            } else {
+                None
+            };
 
         // Get metadata warning count
         let warning_count = crate::metadata::get_and_reset_metadata_warning_count();
@@ -617,35 +639,44 @@ impl MixedStrategyExecutor {
                     total_stats.errors()
                 );
                 if let Some(ref path) = error_report_path {
-                    eprintln!("     📄 Error details saved to: {}", path.display());
+                    eprintln!("📄 Error details saved to: {}", path.display());
                 }
             }
             if warning_count > 0 {
                 eprintln!(
                     "     ⚠️  {warning_count} metadata warnings (permissions/ownership/timestamps)"
                 );
-                eprintln!("        These are non-fatal - files were copied successfully.");
+                eprintln!("These are non-fatal - files were copied successfully.");
                 if warning_count > 10 {
-                    eprintln!("        Consider using --copy DAT to skip metadata preservation.");
+                    eprintln!("Consider using --copy DAT to skip metadata preservation.");
                 }
             }
         }
-        
+
         // Close the logger
         logger.lock().unwrap().close();
-        
-        
+
         Ok(total_stats)
     }
 
     /// Categorize operations by file size and type
-    fn categorize_operations(&self, operations: Vec<FileOperation>, options: &SyncOptions) -> CategorizedOps {
+    fn categorize_operations(
+        &self,
+        operations: Vec<FileOperation>,
+        options: &SyncOptions,
+    ) -> CategorizedOps {
         let mut categorized = CategorizedOps::default();
-        
+
         // Use configured thresholds or defaults
-        let small_threshold = options.small_file_threshold.unwrap_or(DEFAULT_SMALL_FILE_THRESHOLD);
-        let medium_threshold = options.medium_file_threshold.unwrap_or(DEFAULT_MEDIUM_FILE_THRESHOLD);
-        let large_threshold = options.large_file_threshold.unwrap_or(DEFAULT_LARGE_FILE_THRESHOLD);
+        let small_threshold = options
+            .small_file_threshold
+            .unwrap_or(DEFAULT_SMALL_FILE_THRESHOLD);
+        let medium_threshold = options
+            .medium_file_threshold
+            .unwrap_or(DEFAULT_MEDIUM_FILE_THRESHOLD);
+        let large_threshold = options
+            .large_file_threshold
+            .unwrap_or(DEFAULT_LARGE_FILE_THRESHOLD);
 
         for op in operations {
             match &op {
@@ -718,7 +749,7 @@ impl MixedStrategyExecutor {
         progress_bar: Option<&indicatif::ProgressBar>,
         start_time: std::time::Instant,
     ) -> Result<SyncStats> {
-        use crate::metadata::{CopyFlags, copy_file_with_metadata};
+        use crate::metadata::{copy_file_with_metadata, CopyFlags};
 
         let mut stats = SyncStats::default();
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
@@ -735,9 +766,12 @@ impl MixedStrategyExecutor {
             });
 
         // Process in parallel using rayon with optimized settings
-        let active_files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<std::path::PathBuf, std::time::Instant>::new()));
+        let active_files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            std::path::PathBuf,
+            std::time::Instant,
+        >::new()));
         let active_files_clone = active_files.clone();
-        
+
         // Spawn a monitoring thread to detect stalled files
         let monitor_handle = std::thread::spawn(move || {
             loop {
@@ -746,182 +780,253 @@ impl MixedStrategyExecutor {
                 for (path, start_time) in active.iter() {
                     let elapsed = start_time.elapsed();
                     if elapsed > std::time::Duration::from_secs(10) {
-                        eprintln!("[WARNING] File has been processing for {}s: {}", 
-                            elapsed.as_secs(), path.display());
+                        eprintln!(
+                            "[WARNING] File has been processing for {}s: {}",
+                            elapsed.as_secs(),
+                            path.display()
+                        );
                     }
                 }
                 // Also report if we have active files
-                if !active.is_empty() {
-                }
+                if !active.is_empty() {}
                 if active.is_empty() {
                     break;
                 }
             }
         });
-        
+
         let chunk_stats: Vec<_> = pool.install(|| {
             files
                 .par_chunks(SMALL_FILE_BATCH_SIZE)
                 .map(|chunk| {
-                let chunk_stats = SyncStats::default();
+                    let chunk_stats = SyncStats::default();
 
-                for op in chunk {
-                    // Track active file
-                    let file_path = match &op {
-                        FileOperation::Create { path } | FileOperation::Update { path, .. } => Some(path.clone()),
-                        FileOperation::CreateSymlink { path, .. } | FileOperation::UpdateSymlink { path, .. } => Some(path.clone()),
-                        _ => None,
-                    };
-                    
-                    if let Some(path) = &file_path {
-                        active_files.lock().unwrap().insert(path.clone(), std::time::Instant::now());
-                    }
-                    
-                    match op {
-                        FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                            // Use utility function for path resolution and parent directory creation
-                            let dest = match prepare_destination_path(path, source_root, dest_root) {
-                                Ok(dest) => dest,
-                                Err(e) => {
-                                    let robosync_err = RoboSyncError::operation_failed("prepare_path", e.to_string());
-                                    chunk_stats.add_structured_error(robosync_err, "prepare_destination");
-                                    continue;
-                                }
-                            };
+                    for op in chunk {
+                        // Track active file
+                        let file_path = match &op {
+                            FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                                Some(path.clone())
+                            }
+                            FileOperation::CreateSymlink { path, .. }
+                            | FileOperation::UpdateSymlink { path, .. } => Some(path.clone()),
+                            _ => None,
+                        };
 
-                            // Copy the file
-                            match copy_file_with_metadata(path, &dest, &copy_flags) {
-                                Ok(bytes) => {
-                                    chunk_stats.add_bytes_transferred(bytes);
-                                    chunk_stats.increment_files_copied();
+                        if let Some(path) = &file_path {
+                            active_files
+                                .lock()
+                                .unwrap()
+                                .insert(path.clone(), std::time::Instant::now());
+                        }
 
-                                    // Use utility function for progress tracking with file info
-                                    update_progress_with_file(&self.progress, progress_bar, bytes, start_time, path);
-                                    
-                                    // Show on console only with -vv mode
-                                    if options.verbose >= 2 {
-                                        eprintln!("  ✓ Copied: {} → {} ({} bytes)", path.display(), dest.display(), bytes);
-                                    }
-                                    
-                                    // Log to file with -v or higher
-                                    if options.verbose >= 1 {
-                                        if let Some(ref logger) = self.logger {
-                                            if let Ok(logger) = logger.lock() {
-                                                logger.log_file_operation("Copied", &format!("{} → {} ({} bytes)", path.display(), dest.display(), bytes));
+                        match op {
+                            FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                                // Use utility function for path resolution and parent directory creation
+                                let dest =
+                                    match prepare_destination_path(path, source_root, dest_root) {
+                                        Ok(dest) => dest,
+                                        Err(e) => {
+                                            let robosync_err = RoboSyncError::operation_failed(
+                                                "prepare_path",
+                                                e.to_string(),
+                                            );
+                                            chunk_stats.add_structured_error(
+                                                robosync_err,
+                                                "prepare_destination",
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                // Copy the file
+                                match copy_file_with_metadata(path, &dest, &copy_flags) {
+                                    Ok(bytes) => {
+                                        chunk_stats.add_bytes_transferred(bytes);
+                                        chunk_stats.increment_files_copied();
+
+                                        // Use utility function for progress tracking with file info
+                                        update_progress_with_file(
+                                            &self.progress,
+                                            progress_bar,
+                                            bytes,
+                                            start_time,
+                                            path,
+                                        );
+
+                                        // Show on console only with -vv mode
+                                        if options.verbose >= 2 {
+                                            eprintln!(
+                                                "  ✓ Copied: {} → {} ({} bytes)",
+                                                path.display(),
+                                                dest.display(),
+                                                bytes
+                                            );
+                                        }
+
+                                        // Log to file with -v or higher
+                                        if options.verbose >= 1 {
+                                            if let Some(ref logger) = self.logger {
+                                                if let Ok(logger) = logger.lock() {
+                                                    logger.log_file_operation(
+                                                        "Copied",
+                                                        &format!(
+                                                            "{} → {} ({} bytes)",
+                                                            path.display(),
+                                                            dest.display(),
+                                                            bytes
+                                                        ),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    let error_str = e.to_string();
-                                    
-                                    // Log error to file
-                                    if let Some(ref logger) = self.logger {
-                                        if let Ok(logger) = logger.lock() {
-                                            logger.log_error(&format!("Failed to copy {} → {}: {}", path.display(), dest.display(), error_str));
+                                    Err(e) => {
+                                        let error_str = e.to_string();
+
+                                        // Log error to file
+                                        if let Some(ref logger) = self.logger {
+                                            if let Ok(logger) = logger.lock() {
+                                                logger.log_error(&format!(
+                                                    "Failed to copy {} → {}: {}",
+                                                    path.display(),
+                                                    dest.display(),
+                                                    error_str
+                                                ));
+                                            }
+                                        }
+
+                                        // Convert anyhow::Error to RoboSyncError
+                                        let robosync_err = match e.downcast::<std::io::Error>() {
+                                            Ok(io_err) => {
+                                                RoboSyncError::io_error(io_err, Some(path.clone()))
+                                            }
+                                            Err(e) => RoboSyncError::sync_failed(
+                                                e.to_string(),
+                                                Some(path.clone()),
+                                                Some(dest.clone()),
+                                            ),
+                                        };
+                                        chunk_stats.add_structured_error(robosync_err, "copy_file");
+
+                                        // Still increment progress bar even for failed files
+                                        if let Some(pb) = progress_bar {
+                                            pb.inc(1);
                                         }
                                     }
-                                    
-                                    // Convert anyhow::Error to RoboSyncError
-                                    let robosync_err = match e.downcast::<std::io::Error>() {
-                                        Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
-                                        Err(e) => RoboSyncError::sync_failed(
-                                            e.to_string(),
-                                            Some(path.clone()),
-                                            Some(dest.clone())
-                                        ),
+                                }
+                            }
+                            FileOperation::CreateSymlink { path, target }
+                            | FileOperation::UpdateSymlink { path, target } => {
+                                // Use utility function for path resolution and parent directory creation
+                                let dest =
+                                    match prepare_destination_path(path, source_root, dest_root) {
+                                        Ok(dest) => dest,
+                                        Err(e) => {
+                                            let robosync_err = RoboSyncError::operation_failed(
+                                                "prepare_path",
+                                                e.to_string(),
+                                            );
+                                            chunk_stats.add_structured_error(
+                                                robosync_err,
+                                                "prepare_destination",
+                                            );
+                                            continue;
+                                        }
                                     };
-                                    chunk_stats.add_structured_error(robosync_err, "copy_file");
-                                    
-                                    // Still increment progress bar even for failed files
-                                    if let Some(pb) = progress_bar {
-                                        pb.inc(1);
+
+                                // Remove existing symlink if updating
+                                if matches!(op, FileOperation::UpdateSymlink { .. }) {
+                                    let _ = std::fs::remove_file(&dest);
+                                }
+
+                                // Create symlink
+                                #[cfg(unix)]
+                                match std::os::unix::fs::symlink(target, &dest) {
+                                    Ok(_) => {
+                                        chunk_stats.increment_files_copied();
+                                        // Use utility function for progress tracking (symlinks have 0 bytes)
+                                        update_progress(
+                                            &self.progress,
+                                            progress_bar,
+                                            0,
+                                            start_time,
+                                        );
                                     }
-                                }
-                            }
-                        }
-                        FileOperation::CreateSymlink { path, target } |
-                        FileOperation::UpdateSymlink { path, target } => {
-                            // Use utility function for path resolution and parent directory creation
-                            let dest = match prepare_destination_path(path, source_root, dest_root) {
-                                Ok(dest) => dest,
-                                Err(e) => {
-                                    let robosync_err = RoboSyncError::operation_failed("prepare_path", e.to_string());
-                                    chunk_stats.add_structured_error(robosync_err, "prepare_destination");
-                                    continue;
-                                }
-                            };
-
-                            // Remove existing symlink if updating
-                            if matches!(op, FileOperation::UpdateSymlink { .. }) {
-                                let _ = std::fs::remove_file(&dest);
-                            }
-
-                            // Create symlink
-                            #[cfg(unix)]
-                            match std::os::unix::fs::symlink(target, &dest) {
-                                Ok(_) => {
-                                    chunk_stats.increment_files_copied();
-                                    // Use utility function for progress tracking (symlinks have 0 bytes)
-                                    update_progress(&self.progress, progress_bar, 0, start_time);
-                                }
-                                Err(e) => {
-                                    // Log error to file
-                                    if let Some(ref logger) = self.logger {
-                                        if let Ok(logger) = logger.lock() {
-                                            logger.log_error(&format!("Failed to create symlink {} → {}: {}", dest.display(), target.display(), e));
+                                    Err(e) => {
+                                        // Log error to file
+                                        if let Some(ref logger) = self.logger {
+                                            if let Ok(logger) = logger.lock() {
+                                                logger.log_error(&format!(
+                                                    "Failed to create symlink {} → {}: {}",
+                                                    dest.display(),
+                                                    target.display(),
+                                                    e
+                                                ));
+                                            }
                                         }
-                                    }
-                                    
-                                    // Convert to RoboSyncError
-                                    let robosync_err = RoboSyncError::io_error(e, Some(dest.clone()));
-                                    chunk_stats.add_structured_error(robosync_err, "create_symlink");
-                                }
-                            }
 
-                            #[cfg(windows)]
-                            match crate::windows_symlinks::create_symlink(&dest, target) {
-                                Ok(_) => {
-                                    chunk_stats.increment_files_copied();
-                                    // Use utility function for progress tracking (symlinks have 0 bytes)
-                                    update_progress(&self.progress, progress_bar, 0, start_time);
+                                        // Convert to RoboSyncError
+                                        let robosync_err =
+                                            RoboSyncError::io_error(e, Some(dest.clone()));
+                                        chunk_stats
+                                            .add_structured_error(robosync_err, "create_symlink");
+                                    }
                                 }
-                                Err(e) => {
-                                    // Log error to file
-                                    if let Some(ref logger) = self.logger {
-                                        if let Ok(logger) = logger.lock() {
-                                            logger.log_error(&format!("Failed to create symlink {} → {}: {}", dest.display(), target.display(), e));
+
+                                #[cfg(windows)]
+                                match crate::windows_symlinks::create_symlink(&dest, target) {
+                                    Ok(_) => {
+                                        chunk_stats.increment_files_copied();
+                                        // Use utility function for progress tracking (symlinks have 0 bytes)
+                                        update_progress(
+                                            &self.progress,
+                                            progress_bar,
+                                            0,
+                                            start_time,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // Log error to file
+                                        if let Some(ref logger) = self.logger {
+                                            if let Ok(logger) = logger.lock() {
+                                                logger.log_error(&format!(
+                                                    "Failed to create symlink {} → {}: {}",
+                                                    dest.display(),
+                                                    target.display(),
+                                                    e
+                                                ));
+                                            }
                                         }
+
+                                        // Convert to RoboSyncError
+                                        let robosync_err = RoboSyncError::operation_failed(
+                                            "create_symlink",
+                                            e.to_string(),
+                                        );
+                                        chunk_stats
+                                            .add_structured_error(robosync_err, "create_symlink");
                                     }
-                                    
-                                    // Convert to RoboSyncError
-                                    let robosync_err = RoboSyncError::operation_failed(
-                                        "create_symlink",
-                                        e.to_string()
-                                    );
-                                    chunk_stats.add_structured_error(robosync_err, "create_symlink");
                                 }
                             }
+                            _ => {}
                         }
-                        _ => {}
-                    }
-                    
-                    // Remove from active tracking
-                    if let Some(path) = file_path {
-                        active_files.lock().unwrap().remove(&path);
-                    }
-                }
 
-                chunk_stats
-            })
-            .collect()
+                        // Remove from active tracking
+                        if let Some(path) = file_path {
+                            active_files.lock().unwrap().remove(&path);
+                        }
+                    }
+
+                    chunk_stats
+                })
+                .collect()
         });
 
         // Merge all chunk statistics
         for chunk_stat in chunk_stats {
             stats = self.merge_stats(stats, chunk_stat);
         }
-        
+
         // Clean up monitor thread
         drop(active_files);
         let _ = monitor_handle.join();
@@ -947,7 +1052,11 @@ impl MixedStrategyExecutor {
             .filter_map(|op| match op {
                 FileOperation::Create { path } | FileOperation::Update { path, .. } => {
                     // Use utility function for path resolution
-                    let dest = crate::operation_utils::resolve_destination_path(path, source_root, dest_root);
+                    let dest = crate::operation_utils::resolve_destination_path(
+                        path,
+                        source_root,
+                        dest_root,
+                    );
                     Some((path.clone(), dest))
                 }
                 _ => None,
@@ -964,7 +1073,7 @@ impl MixedStrategyExecutor {
                 pb.inc(1);
             }
         }
-        
+
         // Update internal progress tracking
         for _ in 0..stats.files_copied() {
             self.progress.add_file();
@@ -990,44 +1099,62 @@ impl MixedStrategyExecutor {
             match op {
                 FileOperation::Update { path, .. } if options.checksum => {
                     // Use delta transfer for large file updates
-                    let dest = crate::operation_utils::resolve_destination_path(path, source_root, dest_root);
+                    let dest = crate::operation_utils::resolve_destination_path(
+                        path,
+                        source_root,
+                        dest_root,
+                    );
 
                     match self.delta_copy_file(path, &dest, options) {
                         Ok(bytes) => {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
-                            
+
                             // Show on console only with -vv mode
                             if options.verbose >= 2 {
-                                eprintln!("  ✓ Delta transfer complete: {} → {} ({} transferred)", 
-                                    path.display(), 
+                                eprintln!(
+                                    "  ✓ Delta transfer complete: {} → {} ({} transferred)",
+                                    path.display(),
                                     dest.display(),
                                     humanize_bytes(bytes)
                                 );
                             }
-                            
+
                             // Log to file with -v or higher
                             if options.verbose >= 1 {
                                 if let Some(ref logger) = self.logger {
                                     if let Ok(logger) = logger.lock() {
-                                        logger.log_file_operation("Delta transfer complete", &format!("{} → {} ({} bytes)", path.display(), dest.display(), bytes));
+                                        logger.log_file_operation(
+                                            "Delta transfer complete",
+                                            &format!(
+                                                "{} → {} ({} bytes)",
+                                                path.display(),
+                                                dest.display(),
+                                                bytes
+                                            ),
+                                        );
                                     }
                                 }
                             }
-                            
+
                             // Use utility function for progress tracking
                             update_progress(&self.progress, progress_bar, bytes, start_time);
                         }
                         Err(e) => {
                             let error_str = e.to_string();
-                            
+
                             // Log error to file
                             if let Some(ref logger) = self.logger {
                                 if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!("Delta transfer failed {} → {}: {}", path.display(), dest.display(), error_str));
+                                    logger.log_error(&format!(
+                                        "Delta transfer failed {} → {}: {}",
+                                        path.display(),
+                                        dest.display(),
+                                        error_str
+                                    ));
                                 }
                             }
-                            
+
                             // Convert anyhow::Error to RoboSyncError
                             let robosync_err = match e.downcast::<std::io::Error>() {
                                 Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
@@ -1055,21 +1182,34 @@ impl MixedStrategyExecutor {
 
                             self.progress.add_file();
                             self.progress.add_bytes(bytes);
-                            
+
                             // Show on console only with -vv mode
                             if options.verbose >= 2 {
-                                eprintln!("  ✓ Copied: {} → {} ({} bytes)", path.display(), dest.display(), bytes);
+                                eprintln!(
+                                    "  ✓ Copied: {} → {} ({} bytes)",
+                                    path.display(),
+                                    dest.display(),
+                                    bytes
+                                );
                             }
-                            
+
                             // Log to file with -v or higher
                             if options.verbose >= 1 {
                                 if let Some(ref logger) = self.logger {
                                     if let Ok(logger) = logger.lock() {
-                                        logger.log_file_operation("Copied", &format!("{} → {} ({} bytes)", path.display(), dest.display(), bytes));
+                                        logger.log_file_operation(
+                                            "Copied",
+                                            &format!(
+                                                "{} → {} ({} bytes)",
+                                                path.display(),
+                                                dest.display(),
+                                                bytes
+                                            ),
+                                        );
                                     }
                                 }
                             }
-                            
+
                             if let Some(pb) = progress_bar {
                                 pb.inc(1);
                                 let elapsed = start_time.elapsed().as_secs_f64();
@@ -1082,14 +1222,19 @@ impl MixedStrategyExecutor {
                         }
                         Err(e) => {
                             let error_str = e.to_string();
-                            
+
                             // Log error to file
                             if let Some(ref logger) = self.logger {
                                 if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!("Delta transfer failed {} → {}: {}", path.display(), dest.display(), error_str));
+                                    logger.log_error(&format!(
+                                        "Delta transfer failed {} → {}: {}",
+                                        path.display(),
+                                        dest.display(),
+                                        error_str
+                                    ));
                                 }
                             }
-                            
+
                             // Convert anyhow::Error to RoboSyncError
                             let robosync_err = match e.downcast::<std::io::Error>() {
                                 Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
@@ -1124,21 +1269,21 @@ impl MixedStrategyExecutor {
                     // New files can't use delta, use platform copy
                     let relative = path.strip_prefix(source_root).unwrap_or(path);
                     let dest = dest_root.join(relative);
-                    
+
                     // Ensure parent directory exists
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    
+
                     let copier = PlatformCopier::new();
                     match copier.copy_file(path, &dest) {
                         Ok(bytes) => {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
-                            
+
                             self.progress.add_file();
                             self.progress.add_bytes(bytes);
-                            
+
                             if let Some(pb) = progress_bar {
                                 pb.inc(1);
                                 let elapsed = start_time.elapsed().as_secs_f64();
@@ -1151,14 +1296,19 @@ impl MixedStrategyExecutor {
                         }
                         Err(e) => {
                             let error_str = e.to_string();
-                            
+
                             // Log error to file
                             if let Some(ref logger) = self.logger {
                                 if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!("Delta transfer failed {} → {}: {}", path.display(), dest.display(), error_str));
+                                    logger.log_error(&format!(
+                                        "Delta transfer failed {} → {}: {}",
+                                        path.display(),
+                                        dest.display(),
+                                        error_str
+                                    ));
                                 }
                             }
-                            
+
                             // Convert anyhow::Error to RoboSyncError
                             let robosync_err = match e.downcast::<std::io::Error>() {
                                 Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
@@ -1172,48 +1322,61 @@ impl MixedStrategyExecutor {
                     // Use delta transfer for updates
                     let relative = path.strip_prefix(source_root).unwrap_or(path);
                     let dest = dest_root.join(relative);
-                    
+
                     // Log start of delta transfer to console only with -vv
                     if options.verbose >= 2 {
-                        eprintln!("  ⟳ Starting delta transfer: {} → {} (file size: {})", 
-                            path.display(), 
+                        eprintln!(
+                            "  ⟳ Starting delta transfer: {} → {} (file size: {})",
+                            path.display(),
                             dest.display(),
                             humanize_bytes(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
                         );
                     }
-                    
+
                     // Log to file with -v or higher
                     if options.verbose >= 1 {
                         if let Some(ref logger) = self.logger {
                             if let Ok(logger) = logger.lock() {
-                                logger.log_file_operation("Delta transfer starting", &format!("{} → {}", path.display(), dest.display()));
+                                logger.log_file_operation(
+                                    "Delta transfer starting",
+                                    &format!("{} → {}", path.display(), dest.display()),
+                                );
                             }
                         }
                     }
-                    
+
                     match self.delta_copy_file(path, &dest, options) {
                         Ok(bytes) => {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
-                            
+
                             // Log completion to console only with -vv
                             if options.verbose >= 2 {
-                                eprintln!("  ✓ Delta transfer complete: {} → {} ({} transferred)", 
-                                    path.display(), 
+                                eprintln!(
+                                    "  ✓ Delta transfer complete: {} → {} ({} transferred)",
+                                    path.display(),
                                     dest.display(),
                                     humanize_bytes(bytes)
                                 );
                             }
-                            
+
                             // Log to file with -v or higher
                             if options.verbose >= 1 {
                                 if let Some(ref logger) = self.logger {
                                     if let Ok(logger) = logger.lock() {
-                                        logger.log_file_operation("Delta transfer complete", &format!("{} → {} ({} bytes)", path.display(), dest.display(), bytes));
+                                        logger.log_file_operation(
+                                            "Delta transfer complete",
+                                            &format!(
+                                                "{} → {} ({} bytes)",
+                                                path.display(),
+                                                dest.display(),
+                                                bytes
+                                            ),
+                                        );
                                     }
                                 }
                             }
-                            
+
                             if let Some(pb) = progress_bar {
                                 pb.inc(1);
                                 pb.set_message(format!(
@@ -1226,14 +1389,19 @@ impl MixedStrategyExecutor {
                         }
                         Err(e) => {
                             let error_str = e.to_string();
-                            
+
                             // Log error to file
                             if let Some(ref logger) = self.logger {
                                 if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!("Delta transfer failed {} → {}: {}", path.display(), dest.display(), error_str));
+                                    logger.log_error(&format!(
+                                        "Delta transfer failed {} → {}: {}",
+                                        path.display(),
+                                        dest.display(),
+                                        error_str
+                                    ));
                                 }
                             }
-                            
+
                             // Convert anyhow::Error to RoboSyncError
                             let robosync_err = match e.downcast::<std::io::Error>() {
                                 Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
@@ -1246,14 +1414,14 @@ impl MixedStrategyExecutor {
                 _ => {}
             }
         }
-        
+
         Ok(stats)
     }
 
     /// Perform delta copy for a single file
     fn delta_copy_file(&self, source: &Path, dest: &Path, options: &SyncOptions) -> Result<u64> {
+        use crate::metadata::{copy_file_with_metadata, CopyFlags};
         use crate::streaming_delta::StreamingDelta;
-        use crate::metadata::{CopyFlags, copy_file_with_metadata};
         use std::fs;
 
         // Create parent directory if needed
@@ -1269,46 +1437,45 @@ impl MixedStrategyExecutor {
 
         // Use streaming delta for all file sizes
         let streaming_delta = StreamingDelta::new(DELTA_BLOCK_SIZE);
-        
+
         // Log checksum generation
         if options.verbose >= 2 {
             eprintln!("    - Generating checksums for destination file...");
         }
-        
+
         // Generate checksums for destination file
         let checksums = streaming_delta.generate_checksums_streaming(dest)?;
-        
+
         if options.verbose >= 2 {
             eprintln!("    - Generated {} block checksums", checksums.len());
         }
-        
+
         // Create temp file for reconstruction
         let temp_path = dest.with_extension("robosync_tmp");
-        
+
         // Log delta application
         if options.verbose >= 2 {
             eprintln!("    - Applying delta transfer...");
         }
-        
+
         // Apply delta transfer using streaming
-        let transferred_bytes = streaming_delta.apply_delta_streaming(
-            source,
-            dest,
-            &temp_path,
-            &checksums
-        )?;
-        
+        let transferred_bytes =
+            streaming_delta.apply_delta_streaming(source, dest, &temp_path, &checksums)?;
+
         if options.verbose >= 2 {
-            eprintln!("    - Delta transfer complete, {} bytes transferred", transferred_bytes);
+            eprintln!(
+                "    - Delta transfer complete, {} bytes transferred",
+                transferred_bytes
+            );
         }
-        
+
         // Move temp file to destination
         fs::rename(&temp_path, dest)?;
-        
+
         // Copy metadata - the file content is already updated, just need metadata
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
         let _ = crate::metadata_utils::apply_metadata_after_delta(source, dest, &copy_flags);
-        
+
         // Return the amount of data actually transferred
         Ok(transferred_bytes)
     }
@@ -1325,17 +1492,21 @@ impl MixedStrategyExecutor {
         for _ in 0..other.files_deleted() {
             base.increment_files_deleted();
         }
-        
+
         // Merge error details
         for error_detail in other.get_error_details() {
-            base.add_error(error_detail.path, &error_detail.operation, &error_detail.message);
+            base.add_error(
+                error_detail.path,
+                &error_detail.operation,
+                &error_detail.message,
+            );
         }
-        
+
         // Merge structured errors
         for structured_error in other.get_structured_errors() {
             base.add_structured_error(structured_error.error, structured_error.context);
         }
-        
+
         base
     }
 
@@ -1347,9 +1518,9 @@ impl MixedStrategyExecutor {
         progress_bar: Option<&indicatif::ProgressBar>,
         _start_time: std::time::Instant,
     ) -> Result<SyncStats> {
-        use std::sync::{Arc, Mutex};
-        use std::sync::atomic::{AtomicU64, Ordering};
         use crate::sync_stats::StructuredError;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
 
         // Thread-safe counters for parallel processing
         let files_deleted = Arc::new(AtomicU64::new(0));
@@ -1373,7 +1544,8 @@ impl MixedStrategyExecutor {
                                 Err(e) => {
                                     // Don't print to stderr with progress bar active
                                     // Record structured error for log file
-                                    let robosync_err = RoboSyncError::io_error(e, Some(path.clone()));
+                                    let robosync_err =
+                                        RoboSyncError::io_error(e, Some(path.clone()));
                                     if let Ok(mut errors) = structured_errors.lock() {
                                         errors.push(StructuredError {
                                             error: robosync_err,
@@ -1394,7 +1566,8 @@ impl MixedStrategyExecutor {
                                 Err(e) => {
                                     // Don't print to stderr with progress bar active
                                     // Record structured error for log file
-                                    let robosync_err = RoboSyncError::io_error(e, Some(path.clone()));
+                                    let robosync_err =
+                                        RoboSyncError::io_error(e, Some(path.clone()));
                                     if let Ok(mut errors) = structured_errors.lock() {
                                         errors.push(StructuredError {
                                             error: robosync_err,
@@ -1430,7 +1603,7 @@ impl MixedStrategyExecutor {
         for _ in 0..deleted_count {
             stats.increment_files_deleted();
         }
-        
+
         // Add structured errors to stats
         if let Ok(mut errors) = structured_errors.lock() {
             for error in errors.drain(..) {
@@ -1502,7 +1675,7 @@ pub struct SizeBreakdown {
     pub large_size: u64,
     pub delta_count: u64,
     pub delta_size: u64,
-    pub delta_actual: u64,  // Estimated actual transfer size for delta files
+    pub delta_actual: u64, // Estimated actual transfer size for delta files
 }
 
 /// Detailed pending stats with size breakdowns

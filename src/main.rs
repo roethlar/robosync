@@ -281,7 +281,7 @@ fn main() -> Result<()> {
                 .help("Block size for delta algorithm in bytes (default: 1024). Smaller blocks find more matches but use more CPU/memory. Larger blocks are faster but may transfer more data.")
                 .value_parser(clap::value_parser!(usize))
         )
-        
+
         // File size threshold options
         .arg(
             Arg::new("small-file-threshold")
@@ -498,7 +498,7 @@ fn main() -> Result<()> {
     }
     let min_size = matches.get_one::<u64>("min-size").copied();
     let max_size = matches.get_one::<u64>("max-size").copied();
-    
+
     // File size thresholds
     let small_file_threshold = matches.get_one::<u64>("small-file-threshold").copied();
     let medium_file_threshold = matches.get_one::<u64>("medium-file-threshold").copied();
@@ -530,9 +530,7 @@ fn main() -> Result<()> {
         eprintln!(
             "\n  ❌ Error: Maximum thread count is {max_threads} to avoid system file handle limits."
         );
-        eprintln!(
-            "     Requested: {threads}, Maximum allowed: {max_threads}\n"
-        );
+        eprintln!("     Requested: {threads}, Maximum allowed: {max_threads}\n");
         std::process::exit(1);
     }
 
@@ -547,7 +545,7 @@ fn main() -> Result<()> {
     // Print header without lines
     if !show_progress {
         println!(
-            "     {} v{}: {}",
+            "{} v{}: {}",
             "RoboSync".color_bold_if(Color::Cyan),
             env!("CARGO_PKG_VERSION").color_if(Color::White),
             "Fast parallel file synchronization".color_if(Color::White)
@@ -615,18 +613,18 @@ fn main() -> Result<()> {
     if !show_progress {
         println!();
         println!(
-            "     {}  {}",
+            "{}  {}",
             "Source:".color_if(Color::White),
             source_str.as_str().color_if(Color::Green)
         );
         println!(
-            "     {}    {}",
+            "{}    {}",
             "Dest:".color_if(Color::White),
             dest_str.as_str().color_if(Color::Yellow)
         );
         if !options_str.is_empty() {
             println!(
-                "     {} {}",
+                "{} {}",
                 "Options:".color_if(Color::White),
                 options_str.as_str().color_if(Color::DarkGrey)
             );
@@ -636,8 +634,8 @@ fn main() -> Result<()> {
     // Warn about dangerous combinations
     if move_files && mirror {
         eprintln!("  ⚠️  WARNING: Using --mov with --mir is dangerous!");
-        eprintln!("     If the sync is interrupted, source files already moved will be lost.");
-        eprintln!("     Consider using --mir without --mov for safety.");
+        eprintln!("If the sync is interrupted, source files already moved will be lost.");
+        eprintln!("Consider using --mir without --mov for safety.");
         eprintln!();
     }
 
@@ -694,17 +692,17 @@ fn main() -> Result<()> {
 
             let syncer = ParallelSyncer::new(config);
             if let Some(ref strategy) = sync_options.forced_strategy {
-                println!("     Diagnostic mode: using {strategy} strategy");
+                println!("Diagnostic mode: using {strategy} strategy");
             }
             let stats = syncer.synchronize_smart(source, destination, sync_options.clone())?;
-            
+
             // Print summary statistics when not using progress bar
             if !sync_options.show_progress {
-                println!("\n     Summary:");
-                println!("     Files copied: {}", stats.files_copied());
-                println!("     Files deleted: {}", stats.files_deleted());
-                println!("     Bytes transferred: {}", stats.bytes_transferred());
-                println!("     Errors: {}", stats.errors());
+                println!("\nSummary:");
+                println!("Files copied: {}", stats.files_copied());
+                println!("Files deleted: {}", stats.files_deleted());
+                println!("Bytes transferred: {}", stats.bytes_transferred());
+                println!("Errors: {}", stats.errors());
             }
         } else {
             // Default: mixed mode (optimal for all scenarios)
@@ -721,14 +719,14 @@ fn main() -> Result<()> {
 
             let syncer = ParallelSyncer::new(config);
             let stats = syncer.synchronize_smart(source, destination, mixed_options)?;
-            
+
             // Print summary statistics when not using progress bar
             if !sync_options.show_progress {
-                println!("\n     Summary:");
-                println!("     Files copied: {}", stats.files_copied());
-                println!("     Files deleted: {}", stats.files_deleted());
-                println!("     Bytes transferred: {}", stats.bytes_transferred());
-                println!("     Errors: {}", stats.errors());
+                println!("\nSummary:");
+                println!("Files copied: {}", stats.files_copied());
+                println!("Files deleted: {}", stats.files_deleted());
+                println!("Bytes transferred: {}", stats.bytes_transferred());
+                println!("Errors: {}", stats.errors());
             }
         }
     } else {

@@ -334,7 +334,11 @@ impl FastFileListGenerator {
                     Ok(entry) => {
                         let path = entry.path().to_path_buf();
                         // Skip the root directory itself
-                        if path == root { None } else { Some(path) }
+                        if path == root {
+                            None
+                        } else {
+                            Some(path)
+                        }
                     }
                     Err(_) => None,
                 }

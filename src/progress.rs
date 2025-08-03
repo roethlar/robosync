@@ -173,7 +173,7 @@ impl SyncProgress {
         if self.update_interval.as_secs() == u64::MAX {
             return;
         }
-        
+
         if self.silent_mode.load(Ordering::Relaxed) {
             // Final text summary for silent mode
             let elapsed = self.start_time.elapsed();
@@ -287,7 +287,7 @@ impl SyncProgress {
         if self.update_interval.as_secs() == u64::MAX {
             return;
         }
-        
+
         let now = Instant::now();
         let should_update = {
             if let Ok(last) = self.last_update.lock() {
@@ -311,7 +311,7 @@ impl SyncProgress {
         if self.update_interval.as_secs() == u64::MAX {
             return;
         }
-        
+
         let elapsed = self.start_time.elapsed();
         let bytes = self.transferred_bytes.load(Ordering::Relaxed);
 
@@ -373,7 +373,7 @@ impl SyncProgress {
         if self.update_interval.as_secs() == u64::MAX {
             return;
         }
-        
+
         if self.silent_mode.load(Ordering::Relaxed) {
             self.print_text_update();
         }

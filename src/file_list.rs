@@ -116,8 +116,8 @@ where
     F: Fn(usize) + Send + Sync,
 {
     use rayon::prelude::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     // First, collect all entries without checksums
     let mut file_infos = Vec::new();
@@ -624,8 +624,8 @@ where
     F: Fn(usize) + Send + Sync,
 {
     use rayon::prelude::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     // Pre-compute target map with relative paths for faster lookup
     let target_map: HashMap<PathBuf, &FileInfo> = target

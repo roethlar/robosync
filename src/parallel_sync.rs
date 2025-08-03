@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::algorithm::{BlockChecksum, DeltaAlgorithm, Match};
-use crate::compression::{CompressionType, decompress_data};
-use crate::fast_file_list::{FastEnumConfig, FastFileListGenerator, compare_file_lists_fast};
+use crate::compression::{decompress_data, CompressionType};
+use crate::fast_file_list::{compare_file_lists_fast, FastEnumConfig, FastFileListGenerator};
 use crate::file_list::{
-    FileInfo, FileOperation, compare_file_lists_with_roots,
-    compare_file_lists_with_roots_and_progress, generate_file_list_with_options,
-    generate_file_list_with_options_and_progress,
+    compare_file_lists_with_roots, compare_file_lists_with_roots_and_progress,
+    generate_file_list_with_options, generate_file_list_with_options_and_progress, FileInfo,
+    FileOperation,
 };
 // Pattern export functionality moved to separate shimmer project
 use crate::color_output::ConditionalColor;
@@ -21,7 +21,7 @@ use crate::file_list::generate_file_list_parallel;
 #[cfg(target_os = "linux")]
 use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::logging::SyncLogger;
-use crate::metadata::{CopyFlags, copy_file_with_metadata_with_warnings};
+use crate::metadata::{copy_file_with_metadata_with_warnings, CopyFlags};
 use crate::mixed_strategy::MixedStrategyExecutor;
 use crate::native_tools::NativeToolExecutor;
 use crate::options::SyncOptions;
@@ -139,21 +139,21 @@ impl ParallelSyncer {
         }
 
         // Show summary
-        println!("\n     Pending Operation Summary:");
+        println!("\nPending Operation Summary:");
         if new_files > 0 {
-            println!("       New Files: {new_files}");
+            println!("New Files: {new_files}");
         }
         if new_dirs > 0 {
-            println!("       New Directories: {new_dirs}");
+            println!("New Directories: {new_dirs}");
         }
         if updates > 0 {
-            println!("       Updates: {updates}");
+            println!("Updates: {updates}");
         }
         if deletions > 0 {
-            println!("       Deletions: {deletions}");
+            println!("Deletions: {deletions}");
         }
         if symlinks > 0 {
-            println!("       Symlinks: {symlinks}");
+            println!("Symlinks: {symlinks}");
         }
         println!();
 
@@ -184,11 +184,10 @@ impl ParallelSyncer {
             self.collect_operations_with_progress(&source, &destination, &options, true)?;
 
         // Check if confirmation is needed
-        if options.confirm && !operations.is_empty()
-            && !self.confirm_operations(&operations)? {
-                println!("     Operation cancelled by user.");
-                return Ok(SyncStats::default());
-            }
+        if options.confirm && !operations.is_empty() && !self.confirm_operations(&operations)? {
+            println!("Operation cancelled by user.");
+            return Ok(SyncStats::default());
+        }
 
         // We need file count for the executor, but we can get it from operations
         let total_files = operations.len() as u64;
@@ -311,44 +310,44 @@ impl ParallelSyncer {
             let selector = StrategySelector::new();
             match forced.as_str() {
                 "rsync" => {
-                    println!("     Using forced strategy: rsync");
+                    println!("Using forced strategy: rsync");
                     CopyStrategy::NativeRsync {
                         extra_args: selector.build_rsync_args(&options),
                     }
                 }
                 "robocopy" => {
-                    println!("     Using forced strategy: robocopy");
+                    println!("Using forced strategy: robocopy");
                     CopyStrategy::NativeRobocopy {
                         extra_args: selector.build_robocopy_args(&options),
                     }
                 }
                 "platform" => {
-                    println!("     Using forced strategy: platform API");
+                    println!("Using forced strategy: platform API");
                     selector.platform_api_strategy()
                 }
                 "delta" => {
-                    println!("     Using forced strategy: delta transfer");
+                    println!("Using forced strategy: delta transfer");
                     CopyStrategy::DeltaTransfer {
                         block_size: selector.optimal_block_size(file_stats.avg_size),
                     }
                 }
                 "parallel" => {
-                    println!("     Using forced strategy: parallel");
+                    println!("Using forced strategy: parallel");
                     CopyStrategy::ParallelCustom {
                         threads: selector.optimal_thread_count(false),
                     }
                 }
                 #[cfg(target_os = "linux")]
                 "io_uring" => {
-                    println!("     Using forced strategy: io_uring");
+                    println!("Using forced strategy: io_uring");
                     CopyStrategy::IoUringBatch { batch_size: 256 }
                 }
                 "mixed" => {
-                    println!("     Using forced strategy: mixed mode");
+                    println!("Using forced strategy: mixed mode");
                     CopyStrategy::MixedMode
                 }
                 "concurrent" => {
-                    println!("     Using forced strategy: mixed mode");
+                    println!("Using forced strategy: mixed mode");
                     CopyStrategy::MixedMode
                 }
                 _ => {
@@ -396,7 +395,7 @@ impl ParallelSyncer {
                 #[cfg(not(unix))]
                 {
                     let _ = extra_args; // Unused on non-Unix
-                    // Fall back to our implementation on non-Unix
+                                        // Fall back to our implementation on non-Unix
                     self.synchronize_with_options(source, destination, options)
                 }
             }
@@ -417,7 +416,7 @@ impl ParallelSyncer {
                 #[cfg(not(target_os = "windows"))]
                 {
                     let _ = extra_args; // Unused on non-Windows
-                    // Fall back to our implementation on non-Windows
+                                        // Fall back to our implementation on non-Windows
                     self.synchronize_with_options(source, destination, options)
                 }
             }
@@ -469,9 +468,7 @@ impl ParallelSyncer {
 
             #[cfg(target_os = "linux")]
             CopyStrategy::IoUringBatch { batch_size } => {
-                println!(
-                    "Using io_uring batch mode with batch size {batch_size}..."
-                );
+                println!("Using io_uring batch mode with batch size {batch_size}...");
                 // Use our Linux optimized path
                 let mut opts = options.clone();
                 opts.linux_optimized = true;
@@ -488,10 +485,7 @@ impl ParallelSyncer {
                 let executor = if !options.show_progress {
                     MixedStrategyExecutor::new_with_no_progress()
                 } else {
-                    MixedStrategyExecutor::new(
-                        file_stats.total_files as u64,
-                        file_stats.total_size,
-                    )
+                    MixedStrategyExecutor::new(file_stats.total_files as u64, file_stats.total_size)
                 };
                 executor.execute(operations, &source, &destination, &options)
             }
@@ -589,7 +583,7 @@ impl ParallelSyncer {
             if let Some(ref mp) = multi_progress {
                 let _ = mp.println("     📁 Destination directory doesn't exist - will be created");
             } else if show_progress && options.show_progress {
-                println!("     📁 Destination directory doesn't exist - will be created");
+                println!("📁 Destination directory doesn't exist - will be created");
             }
             Vec::new()
         };
@@ -646,9 +640,9 @@ impl ParallelSyncer {
         let _start_time = Instant::now();
 
         println!("Starting parallel synchronization...");
-        println!("  Source: {}", source.display());
-        println!("  Destination: {}", destination.display());
-        println!("  Threads: {}", self.config.worker_threads);
+        println!("Source: {}", source.display());
+        println!("Destination: {}", destination.display());
+        println!("Threads: {}", self.config.worker_threads);
 
         // Create destination parent directory if needed, but don't create destination itself for file-to-file sync
         if source.is_dir() && !destination.exists() {
@@ -1270,9 +1264,7 @@ impl ParallelSyncer {
             .build()
             .context("Failed to create thread pool")?;
 
-        println!(
-            "DEBUG: Using {effective_threads} threads for parallel operations"
-        );
+        println!("DEBUG: Using {effective_threads} threads for parallel operations");
 
         // Separate operations by type for optimal ordering
         let (dir_ops, file_ops): (Vec<_>, Vec<_>) = operations
@@ -1361,9 +1353,7 @@ impl ParallelSyncer {
             }
 
             // Pre-create all necessary directories to avoid redundant checks
-            println!(
-                "DEBUG: Starting directory pre-creation for {small_files_count} small files"
-            );
+            println!("DEBUG: Starting directory pre-creation for {small_files_count} small files");
             let mut dirs_to_create = std::collections::HashSet::new();
             for operation in &small_files {
                 match operation {
@@ -1393,7 +1383,7 @@ impl ParallelSyncer {
             if options.linux_optimized {
                 println!("DEBUG: Linux optimized mode enabled, checking for batch copy");
                 // Import io_uring directly here to avoid module issues
-                use io_uring::{IoUring, opcode, types};
+                use io_uring::{opcode, types, IoUring};
                 use std::os::unix::io::AsRawFd;
 
                 // Collect source-destination pairs for batch processing
@@ -2102,39 +2092,39 @@ impl ParallelSyncer {
                 //     stats.add_bytes_transferred(file_stats.bytes_transferred());
                 //     Ok(file_stats)
                 // } else {
-                    // Parse copy flags and copy file with metadata
-                    let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                    let bytes_copied = copy_file_with_metadata_with_warnings(
-                        &path,
-                        &dest_path,
-                        &copy_flags,
-                        &stats.warnings,
-                    )?;
+                // Parse copy flags and copy file with metadata
+                let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                let bytes_copied = copy_file_with_metadata_with_warnings(
+                    &path,
+                    &dest_path,
+                    &copy_flags,
+                    &stats.warnings,
+                )?;
 
-                    // If move mode is enabled, delete source file after successful copy
-                    if options.move_files && !options.dry_run {
-                        fs::remove_file(&path).with_context(|| {
-                            format!(
-                                "Failed to delete source file after move: {}",
-                                path.display()
-                            )
-                        })?;
+                // If move mode is enabled, delete source file after successful copy
+                if options.move_files && !options.dry_run {
+                    fs::remove_file(&path).with_context(|| {
+                        format!(
+                            "Failed to delete source file after move: {}",
+                            path.display()
+                        )
+                    })?;
 
-                        if options.verbose >= 2 {
-                            let message = format!(
-                                "    Moved File      {:>12}  {} -> {}",
-                                file_size,
-                                path.display(),
-                                dest_path.display()
-                            );
-                            logger.log(&message);
-                        }
+                    if options.verbose >= 2 {
+                        let message = format!(
+                            "    Moved File      {:>12}  {} -> {}",
+                            file_size,
+                            path.display(),
+                            dest_path.display()
+                        );
+                        logger.log(&message);
                     }
+                }
 
-                    stats.add_bytes_transferred(bytes_copied);
-                    let stats = SyncStats::default();
-                    stats.add_bytes_transferred(bytes_copied);
-                    Ok(stats)
+                stats.add_bytes_transferred(bytes_copied);
+                let stats = SyncStats::default();
+                stats.add_bytes_transferred(bytes_copied);
+                Ok(stats)
             }
             FileOperation::Delete { path } => {
                 // Use symlink_metadata to check type without following symlinks

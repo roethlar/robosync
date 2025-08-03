@@ -30,8 +30,8 @@ pub mod parallel_sync;
 pub mod platform_api;
 pub mod progress;
 pub mod retry;
-pub mod streaming_delta;
 pub mod strategy;
+pub mod streaming_delta;
 pub mod sync;
 pub mod sync_stats;
 // Core file synchronization modules only
@@ -50,6 +50,6 @@ pub use checksum::ChecksumType;
 pub use error::{Result, RoboSyncError};
 pub use options::SyncOptions;
 pub use parallel_sync::{ParallelSyncConfig, ParallelSyncer};
-pub use retry::{RetryConfig, with_retry};
+pub use retry::{with_retry, RetryConfig};
 pub use sync::synchronize;
 pub use sync_stats::SyncStats;

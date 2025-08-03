@@ -73,7 +73,7 @@ impl SyncLogger {
             }
         }
     }
-    
+
     /// Log a message to file only (not to console)
     pub fn log_to_file_only(&self, message: &str) {
         if let Some(ref log_file) = self.log_file {
@@ -95,7 +95,7 @@ impl SyncLogger {
             self.log(&progress_message);
         }
     }
-    
+
     /// Log current file being processed
     pub fn log_file_operation(&self, operation: &str, path: &str) {
         if let Some(ref log_file) = self.log_file {

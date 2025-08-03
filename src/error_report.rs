@@ -33,10 +33,12 @@ impl ErrorReporter {
         let report_path = if let Some(ref log_file) = options.log_file {
             // If --log is specified, create error file based on that name
             let log_path = PathBuf::from(log_file);
-            let stem = log_path.file_stem()
+            let stem = log_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("log");
-            let extension = log_path.extension()
+            let extension = log_path
+                .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("log");
             PathBuf::from(format!("{stem}_errors.{extension}"))
@@ -111,24 +113,18 @@ impl ErrorReporter {
 
     /// Get error count
     pub fn error_count(&self) -> usize {
-        *self
-            .error_count
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("Warning: Error report lock poisoned: {}", e);
-                std::process::exit(1);
-            })
+        *self.error_count.lock().unwrap_or_else(|e| {
+            eprintln!("Warning: Error report lock poisoned: {}", e);
+            std::process::exit(1);
+        })
     }
 
     /// Get warning count
     pub fn warning_count(&self) -> usize {
-        *self
-            .warning_count
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("Warning: Error report lock poisoned: {}", e);
-                std::process::exit(1);
-            })
+        *self.warning_count.lock().unwrap_or_else(|e| {
+            eprintln!("Warning: Error report lock poisoned: {}", e);
+            std::process::exit(1);
+        })
     }
 
     /// Write the error report to file if there were any errors or warnings
@@ -242,9 +238,7 @@ impl ErrorReportHandle {
                 );
             } else if self.show_progress && *count % 10 == 0 {
                 // Only print count periodically if not verbose and progress is shown
-                eprintln!(
-                    "  [{count}] errors encountered (details will be saved to report)"
-                );
+                eprintln!("  [{count}] errors encountered (details will be saved to report)");
             }
         }
     }
@@ -265,9 +259,7 @@ impl ErrorReportHandle {
             *count += 1;
             // Only print count periodically to reduce noise
             if *count % 10 == 0 {
-                eprintln!(
-                    "  [{count}] warnings encountered (details will be saved to report)"
-                );
+                eprintln!("  [{count}] warnings encountered (details will be saved to report)");
             }
         }
     }

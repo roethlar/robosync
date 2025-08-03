@@ -1,7 +1,7 @@
 //! Example showing how to use RoboSync's error reporting functionality
 
 use robosync::error_report::ErrorReporter;
-use robosync::metadata::{CopyFlags, copy_file_with_metadata_and_reporter};
+use robosync::metadata::{copy_file_with_metadata_and_reporter, CopyFlags};
 use robosync::options::SyncOptions;
 use std::path::Path;
 
