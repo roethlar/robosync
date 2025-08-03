@@ -426,6 +426,7 @@ impl MixedStrategyExecutor {
                 let pb_status = pb.clone();
                 let total_ops = operation_count;
                 let start_time = std::time::Instant::now();
+                let progress_tracker = Arc::clone(&self.progress);
                 thread::spawn(move || {
                     let mut last_position = 0u64;
                     let mut stall_count = 0;
@@ -446,6 +447,14 @@ impl MixedStrategyExecutor {
                             0.0
                         };
 
+                        // Calculate throughput
+                        let bytes_transferred = progress_tracker.get_bytes_transferred();
+                        let throughput = if elapsed_secs > 0.0 {
+                            (bytes_transferred as f64 / elapsed_secs) as u64
+                        } else {
+                            0
+                        };
+
                         // Check for stalls
                         if current_position == last_position {
                             stall_count += 1;
@@ -461,17 +470,20 @@ impl MixedStrategyExecutor {
                         let status = if stall_count > 50 {
                             // 5 seconds
                             format!(
-                                " {} Syncing: {}/{} files | {:.1} files/s | ⚠️  Stalled for {}s",
+                                " {} Syncing: {}/{} files | {}/s | ⚠️  Stalled for {}s",
                                 spinner_chars[spinner_idx],
                                 current_position,
                                 total_ops,
-                                last_rate,
+                                indicatif::HumanBytes(throughput),
                                 stall_count / 10
                             )
                         } else {
                             format!(
-                                " {} Syncing: {}/{} files | {:.1} files/s",
-                                spinner_chars[spinner_idx], current_position, total_ops, rate
+                                " {} Syncing: {}/{} files | {}/s",
+                                spinner_chars[spinner_idx], 
+                                current_position, 
+                                total_ops, 
+                                indicatif::HumanBytes(throughput)
                             )
                         };
 
@@ -635,7 +647,7 @@ impl MixedStrategyExecutor {
             eprintln!();
             if total_stats.errors() > 0 {
                 eprintln!(
-                    "     ⚠️  {} errors occurred during synchronization",
+                    "⚠️  {} errors occurred during synchronization",
                     total_stats.errors()
                 );
                 if let Some(ref path) = error_report_path {
@@ -644,7 +656,7 @@ impl MixedStrategyExecutor {
             }
             if warning_count > 0 {
                 eprintln!(
-                    "     ⚠️  {warning_count} metadata warnings (permissions/ownership/timestamps)"
+                    "⚠️  {warning_count} metadata warnings (permissions/ownership/timestamps)"
                 );
                 eprintln!("These are non-fatal - files were copied successfully.");
                 if warning_count > 10 {

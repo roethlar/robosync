@@ -2,16 +2,29 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.10] - 2025-08-03
+
+### Changed
+- Consolidated all v1.0.9 improvements for proper release
+- Left-aligned output formatting throughout the application
+- Enhanced status line with throughput display
+
+### Fixed
+- Error summary indentation now consistently left-aligned
+- Status line shows data throughput (MB/s, GB/s) without requiring -p flag
+
 ## [1.0.9] - 2025-08-03
 
 ### Changed
 - Simplified output alignment by removing all leading spaces for consistent left alignment
 - All output messages now start at column 0 for better maintainability
-- Progress bar now correctly displays throughput (MB/s, GB/s) instead of just files/s
+- Status line now displays throughput (MB/s, GB/s) without requiring -p flag
+- Progress tracking improvements in preparation for v1.1.0
 
 ### Fixed
 - Fixed inconsistent indentation between different output sections
 - Fixed alignment issues in mixed strategy and parallel sync output
+- Fixed status line to show data throughput instead of just files/s
 
 ## [1.0.8] - 2025-08-03
 

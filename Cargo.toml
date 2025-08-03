@@ -1,6 +1,6 @@
 [package]
 name = "robosync"
-version = "1.0.9"
+version = "1.0.10"
 edition = "2021"
 authors = ["RoboSync Contributors"]
 description = "High-performance file synchronization with intelligent concurrent processing"
