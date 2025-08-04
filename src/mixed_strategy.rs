@@ -616,6 +616,12 @@ impl MixedStrategyExecutor {
                 "Bytes transferred: {}",
                 total_stats.bytes_transferred()
             ));
+            let reflinks = total_stats.reflinks_succeeded();
+            let reflink_fallbacks = total_stats.reflinks_failed_fallback();
+            if reflinks > 0 || reflink_fallbacks > 0 {
+                logger.log_to_file_only(&format!("Reflinks succeeded: {}", reflinks));
+                logger.log_to_file_only(&format!("Reflinks fallback: {}", reflink_fallbacks));
+            }
             logger.log_to_file_only(&format!("Errors: {}", total_stats.errors()));
 
             // Log error details
@@ -761,7 +767,8 @@ impl MixedStrategyExecutor {
         progress_bar: Option<&indicatif::ProgressBar>,
         start_time: std::time::Instant,
     ) -> Result<SyncStats> {
-        use crate::metadata::{copy_file_with_metadata, CopyFlags};
+        use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+        use crate::reflink::ReflinkOptions;
 
         let mut stats = SyncStats::default();
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
@@ -851,7 +858,10 @@ impl MixedStrategyExecutor {
                                     };
 
                                 // Copy the file
-                                match copy_file_with_metadata(path, &dest, &copy_flags) {
+                                let reflink_options = ReflinkOptions {
+                                    mode: options.reflink,
+                                };
+                                match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, Some(&chunk_stats)) {
                                     Ok(bytes) => {
                                         chunk_stats.add_bytes_transferred(bytes);
                                         chunk_stats.increment_files_copied();
@@ -1432,7 +1442,8 @@ impl MixedStrategyExecutor {
 
     /// Perform delta copy for a single file
     fn delta_copy_file(&self, source: &Path, dest: &Path, options: &SyncOptions) -> Result<u64> {
-        use crate::metadata::{copy_file_with_metadata, CopyFlags};
+        use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+        use crate::reflink::ReflinkOptions;
         use crate::streaming_delta::StreamingDelta;
         use std::fs;
 
@@ -1444,7 +1455,10 @@ impl MixedStrategyExecutor {
         // If destination doesn't exist, do a regular copy
         if !dest.exists() {
             let copy_flags = CopyFlags::from_string(&options.copy_flags);
-            return copy_file_with_metadata(source, dest, &copy_flags);
+            let reflink_options = ReflinkOptions {
+                mode: options.reflink,
+            };
+            return copy_file_with_metadata_and_reflink(source, dest, &copy_flags, &reflink_options, None);
         }
 
         // Use streaming delta for all file sizes
@@ -1591,8 +1605,7 @@ impl MixedStrategyExecutor {
                         }
                     }
                     Err(e) => {
-                        // Don't print to stderr with progress bar active
-                        // Record structured error for log file
+                        // Record all errors during delete operations
                         let robosync_err = RoboSyncError::io_error(e, Some(path.clone()));
                         if let Ok(mut errors) = structured_errors.lock() {
                             errors.push(StructuredError {

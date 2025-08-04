@@ -1,6 +1,7 @@
 //! Synchronization options and configuration
 
 use crate::compression::CompressionConfig;
+use crate::reflink::ReflinkMode;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -43,6 +44,7 @@ pub struct Config {
     pub small_file_threshold: Option<u64>,
     pub medium_file_threshold: Option<u64>,
     pub large_file_threshold: Option<u64>,
+    pub buffer_memory_fraction: Option<f64>,
 }
 
 /// Load configuration from .robosync.toml file if it exists
@@ -92,6 +94,7 @@ pub struct SyncOptions {
     pub retry_count: u32,
     pub retry_wait: u32,
     pub checksum: bool,
+    pub reflink: ReflinkMode,
     #[cfg(target_os = "linux")]
     pub linux_optimized: bool,
     pub forced_strategy: Option<String>,
@@ -104,6 +107,7 @@ pub struct SyncOptions {
     pub small_file_threshold: Option<u64>,
     pub medium_file_threshold: Option<u64>,
     pub large_file_threshold: Option<u64>,
+    pub buffer_memory_fraction: Option<f64>,
 }
 
 impl Default for SyncOptions {
@@ -129,6 +133,7 @@ impl Default for SyncOptions {
             retry_count: 0,
             retry_wait: 30,
             checksum: false,
+            reflink: ReflinkMode::default(),
             #[cfg(target_os = "linux")]
             linux_optimized: false,
             forced_strategy: None,
@@ -138,6 +143,7 @@ impl Default for SyncOptions {
             small_file_threshold: None,
             medium_file_threshold: None,
             large_file_threshold: None,
+            buffer_memory_fraction: None,
         }
     }
 }

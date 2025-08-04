@@ -1,8 +1,11 @@
 //! File metadata handling for copy operations
 
 use crate::error_report::ErrorReportHandle;
+use crate::reflink::{try_reflink, ReflinkOptions, ReflinkResult};
+use crate::sync_stats::SyncStats;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
@@ -61,6 +64,17 @@ pub fn copy_file_with_metadata(
     copy_file_with_metadata_and_reporter(source, destination, flags, None)
 }
 
+/// Copy a file with specified metadata preservation and reflink support
+pub fn copy_file_with_metadata_and_reflink(
+    source: &Path,
+    destination: &Path,
+    flags: &CopyFlags,
+    reflink_options: &ReflinkOptions,
+    stats: Option<&SyncStats>,
+) -> Result<u64> {
+    copy_file_with_metadata_reflink_and_reporter(source, destination, flags, reflink_options, stats, None)
+}
+
 /// Copy a file with specified metadata preservation and error reporting
 pub fn copy_file_with_metadata_and_reporter(
     source: &Path,
@@ -68,8 +82,28 @@ pub fn copy_file_with_metadata_and_reporter(
     flags: &CopyFlags,
     error_reporter: Option<&ErrorReportHandle>,
 ) -> Result<u64> {
+    // Call the reflink version with default options
+    copy_file_with_metadata_reflink_and_reporter(
+        source,
+        destination,
+        flags,
+        &ReflinkOptions::default(),
+        None,
+        error_reporter,
+    )
+}
+
+/// Copy a file with specified metadata preservation, reflink support, and error reporting
+pub fn copy_file_with_metadata_reflink_and_reporter(
+    source: &Path,
+    destination: &Path,
+    flags: &CopyFlags,
+    reflink_options: &ReflinkOptions,
+    stats: Option<&SyncStats>,
+    error_reporter: Option<&ErrorReportHandle>,
+) -> Result<u64> {
     // Check if source is a symlink first
-    let source_metadata = fs::symlink_metadata(source)
+    let source_metadata = crate::metadata_cache::MetadataCache::get_symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
 
     if source_metadata.is_symlink() {
@@ -78,7 +112,32 @@ pub fn copy_file_with_metadata_and_reporter(
 
     // First, let's copy the file data - this is the critical part
     let bytes_copied = if flags.data {
-        streaming_copy_optimized(source, destination)?
+        // Try reflink first if enabled
+        match try_reflink(source, destination, reflink_options) {
+            ReflinkResult::Success => {
+                // Reflink succeeded - update stats if provided
+                if let Some(stats) = stats {
+                    stats.add_reflink_success();
+                }
+                // Get file size for bytes_copied
+                source_metadata.len()
+            }
+            ReflinkResult::Fallback => {
+                // Reflink not supported or failed - fall back to regular copy
+                if let Some(stats) = stats {
+                    stats.add_reflink_fallback();
+                }
+                streaming_copy_optimized(source, destination)?
+            }
+            ReflinkResult::Error(e) => {
+                // Hard error - convert to io::Error and fail
+                let io_err = match e {
+                    crate::reflink::ReflinkError::Io(io_err) => io_err,
+                    other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+                };
+                return Err(io_err.into());
+            }
+        }
     } else {
         return Err(anyhow::anyhow!(
             "Data flag (D) must be set for file copying"
@@ -86,7 +145,7 @@ pub fn copy_file_with_metadata_and_reporter(
     };
 
     // Now apply metadata - these are less critical and some may fail due to permissions
-    let metadata = fs::metadata(source)
+    let metadata = crate::metadata_cache::MetadataCache::get_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
 
     // Apply each type of metadata, but don't fail the whole operation for non-critical errors
@@ -680,9 +739,15 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
     // Use unbuffered I/O for better performance on large files
     use std::fs::File;
     use std::io::{Read, Write};
+    use crate::buffer_sizing::BufferSizer;
+    use crate::options::SyncOptions;
 
-    // Use smaller buffer for better compatibility with network file systems
-    const NETWORK_BUFFER_SIZE: usize = 1 * 1024 * 1024; // 1MB instead of 32MB
+    let options = SyncOptions::default(); // This will be replaced with actual options later
+    let buffer_sizer = BufferSizer::new(&options);
+    let buffer_size = buffer_sizer.calculate_buffer_size(std::fs::metadata(source)?.len());
+
+    let source_file_metadata = std::fs::metadata(source)?;
+    let buffer_size = buffer_sizer.calculate_buffer_size(source_file_metadata.len());
 
     let mut source_file = File::open(source)
         .with_context(|| format!("Failed to open source file: {}", source.display()))?;
@@ -700,7 +765,7 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
     }
 
     // Direct I/O without buffering for maximum throughput
-    let mut buffer = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut buffer = vec![0u8; buffer_size];
     let mut total_bytes = 0u64;
 
     loop {

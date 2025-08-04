@@ -44,6 +44,7 @@ impl Default for FastEnumConfig {
 }
 
 /// Fast file list generator with progress tracking
+#[derive(Clone)]
 pub struct FastFileListGenerator {
     config: FastEnumConfig,
     progress: Option<Arc<SyncProgress>>,
@@ -59,6 +60,11 @@ impl FastFileListGenerator {
 
     pub fn with_progress(mut self, progress: Arc<SyncProgress>) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    pub fn with_progress_interval(mut self, interval: usize) -> Self {
+        self.config.progress_interval = interval;
         self
     }
 
@@ -78,6 +84,160 @@ impl FastFileListGenerator {
 
         // Fallback to optimized rayon-based implementation
         self.generate_with_rayon(root, options)
+    }
+
+    /// Generate file list with external progress counter
+    pub fn generate_file_list_with_counter(
+        &self,
+        root: &Path,
+        options: &SyncOptions,
+        counter: Arc<AtomicUsize>,
+    ) -> Result<Vec<FileInfo>> {
+        let _start_time = Instant::now();
+
+        // Use platform-optimized implementation if available
+        #[cfg(target_os = "linux")]
+        if let Ok(files) = self.generate_with_jwalk_counter(root, options, Arc::clone(&counter)) {
+            let _elapsed = _start_time.elapsed();
+            return Ok(files);
+        }
+
+        // Fallback to optimized rayon-based implementation
+        self.generate_with_rayon_counter(root, options, counter)
+    }
+
+    /// Linux-specific optimized implementation using jwalk with counter
+    #[cfg(target_os = "linux")]
+    fn generate_with_jwalk_counter(
+        &self,
+        root: &Path,
+        options: &SyncOptions,
+        external_counter: Arc<AtomicUsize>,
+    ) -> Result<Vec<FileInfo>> {
+        use jwalk::{Parallelism, WalkDir as JWalkDir};
+
+        let file_count = AtomicUsize::new(0);
+        let last_update = Arc::new(Mutex::new(Instant::now()));
+
+        // Clone exclude_dirs for use in closure
+        let exclude_dirs = options.exclude_dirs.clone();
+
+        // Configure jwalk for optimal performance
+        let entries: Result<Vec<FileInfo>, _> = JWalkDir::new(root)
+            .parallelism(Parallelism::RayonNewPool(self.config.scan_threads))
+            .skip_hidden(false)
+            .follow_links(false)
+            .process_read_dir(move |_depth, path, _read_dir_state, children| {
+                // Check if this directory should be excluded
+                if let Some(dir_name) = path.file_name() {
+                    let dir_name_str = dir_name.to_string_lossy();
+                    for pattern in &exclude_dirs {
+                        // Exact match only (fixed from v1.0.11)
+                        if pattern == &dir_name_str {
+                            // Clear children to prevent traversing into excluded directory
+                            children.clear();
+                            return;
+                        }
+                    }
+                }
+
+                // Skip permission errors during directory traversal
+                children.retain(|entry| {
+                    if let Err(e) = entry {
+                        if let Some(io_err) = e.io_error() {
+                            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                                // Silently skip permission denied errors
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                });
+            })
+            .into_iter()
+            .par_bridge()
+            .filter_map(|entry| {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+
+                        // Skip the root directory itself
+                        if path == root {
+                            return None;
+                        }
+
+                        // Get metadata efficiently
+                        // Use fresh metadata instead of potentially cached entry metadata
+                        let metadata = match std::fs::symlink_metadata(&path) {
+                            Ok(m) => m,
+                            Err(_) => return None, // File doesn't exist, skip it
+                        };
+
+                        let is_symlink = metadata.is_symlink();
+                        let symlink_target = if is_symlink {
+                            std::fs::read_link(&path).ok()
+                        } else {
+                            None
+                        };
+
+                        let file_info = FileInfo {
+                            path: path.clone(),
+                            size: metadata.len(),
+                            modified: metadata
+                                .modified()
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            is_directory: metadata.is_dir(),
+                            is_symlink,
+                            symlink_target,
+                            checksum: None,
+                        };
+
+                        // Apply filters
+                        if self.should_include_file(&file_info, root, options) {
+                            // Update both internal and external counters
+                            let count = file_count.fetch_add(1, Ordering::Relaxed);
+                            external_counter.fetch_add(1, Ordering::Relaxed);
+                            
+                            if count % self.config.progress_interval == 0 {
+                                if let Some(ref progress) = self.progress {
+                                    // Only update if enough time has passed to avoid overhead
+                                    let now = Instant::now();
+                                    let should_update = {
+                                        if let Ok(last) = last_update.lock() {
+                                            now.duration_since(*last) >= Duration::from_millis(500)
+                                        } else {
+                                            false
+                                        }
+                                    };
+
+                                    if should_update {
+                                        if let Ok(mut last) = last_update.lock() {
+                                            *last = now;
+                                        }
+                                        progress.print_update();
+                                    }
+                                }
+                            }
+
+                            Some(Ok(file_info))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        // Skip permission errors silently
+                        if let Some(io_err) = e.io_error() {
+                            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                                return None;
+                            }
+                        }
+                        Some(Err(anyhow::anyhow!("Walk error: {}", e)))
+                    }
+                }
+            })
+            .collect();
+
+        entries
     }
 
     /// Linux-specific optimized implementation using jwalk
@@ -136,9 +296,10 @@ impl FastFileListGenerator {
                         }
 
                         // Get metadata efficiently
-                        let metadata = match entry.metadata() {
+                        // Use fresh metadata instead of potentially cached entry metadata
+                        let metadata = match std::fs::symlink_metadata(&path) {
                             Ok(m) => m,
-                            Err(_) => return None,
+                            Err(_) => return None, // File doesn't exist, skip it
                         };
 
                         let is_symlink = metadata.is_symlink();
@@ -321,9 +482,111 @@ impl FastFileListGenerator {
         Ok(all_files)
     }
 
+    /// Cross-platform optimized implementation using rayon with counter
+    fn generate_with_rayon_counter(
+        &self,
+        root: &Path,
+        options: &SyncOptions,
+        external_counter: Arc<AtomicUsize>,
+    ) -> Result<Vec<FileInfo>> {
+        // First, quickly enumerate all directory entries
+        let entries = self.collect_entries_fast(root)?;
+        
+        if let Some(ref progress) = self.progress {
+            progress.print_update();
+        }
+        
+        // Process entries in parallel batches
+        let file_count = AtomicUsize::new(0);
+        let last_update = Arc::new(Mutex::new(Instant::now()));
+        
+        let files: Result<Vec<_>, _> = entries
+            .par_chunks(self.config.batch_size)
+            .map(|chunk| {
+                let mut batch_files = Vec::with_capacity(chunk.len());
+                
+                for path in chunk {
+                    // Use symlink_metadata to get info about the symlink itself
+                    let metadata = match std::fs::symlink_metadata(path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+
+                    let is_symlink = metadata.is_symlink();
+                    let symlink_target = if is_symlink {
+                        std::fs::read_link(path).ok()
+                    } else {
+                        None
+                    };
+
+                    let file_info = FileInfo {
+                        path: path.clone(),
+                        size: metadata.len(),
+                        modified: metadata
+                            .modified()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                        is_directory: metadata.is_dir(),
+                        is_symlink,
+                        symlink_target,
+                        checksum: None,
+                    };
+
+                    // Apply filters
+                    if self.should_include_file(&file_info, root, options) {
+                        batch_files.push(file_info);
+                        
+                        // Update both counters
+                        let count = file_count.fetch_add(1, Ordering::Relaxed);
+                        external_counter.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Update progress if configured
+                        if count % self.config.progress_interval == 0 {
+                            if let Some(ref progress) = self.progress {
+                                let now = Instant::now();
+                                let should_update = {
+                                    if let Ok(last) = last_update.lock() {
+                                        now.duration_since(*last) >= Duration::from_millis(500)
+                                    } else {
+                                        false
+                                    }
+                                };
+
+                                if should_update {
+                                    if let Ok(mut last) = last_update.lock() {
+                                        *last = now;
+                                    }
+                                    progress.print_update();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Ok::<Vec<FileInfo>, anyhow::Error>(batch_files)
+            })
+            .collect();
+
+        let file_batches = files?;
+        let all_files: Vec<FileInfo> = file_batches.into_iter().flatten().collect();
+        
+        Ok(all_files)
+    }
+
     /// Fast directory entry collection using optimized traversal
     fn collect_entries_fast(&self, root: &Path) -> Result<Vec<PathBuf>> {
-        // Use walkdir with optimizations
+        // Use Windows-optimized enumeration if available
+        #[cfg(target_os = "windows")]
+        {
+            // Try Windows-specific optimization first
+            match crate::windows_fast_enum::collect_entries_windows(root) {
+                Ok(entries) => return Ok(entries),
+                Err(_) => {
+                    // Fall back to standard method if Windows API fails
+                }
+            }
+        }
+        
+        // Standard cross-platform implementation
         use walkdir::WalkDir;
 
         let entries: Vec<PathBuf> = WalkDir::new(root)

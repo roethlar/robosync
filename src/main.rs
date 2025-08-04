@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use robosync::compression::CompressionConfig;
 use robosync::options::{load_config, SymlinkBehavior, SyncOptions};
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
+use robosync::reflink::ReflinkMode;
 use robosync::sync;
 
 /// Get the maximum safe thread count based on OS file handle limits
@@ -397,6 +398,14 @@ fn main() -> Result<()> {
                 .help("Skip based on checksum, not mod-time & size")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("reflink")
+                .long("reflink")
+                .value_name("MODE")
+                .help("Control when to use copy-on-write clones (always, auto, never)")
+                .value_parser(["always", "auto", "never"])
+                .default_value("auto"),
+        )
         .get_matches();
 
     // Load config from .robosync.toml if it exists
@@ -437,6 +446,11 @@ fn main() -> Result<()> {
     let debug = matches.get_flag("debug");
     let no_smart = matches.get_flag("no-smart");
     let _smart_mode = !no_smart; // Smart mode is now default (unused but kept for clarity)
+    let reflink = match matches.get_one::<String>("reflink").map(|s| s.as_str()) {
+        Some("always") => ReflinkMode::Always,
+        Some("never") => ReflinkMode::Never,
+        _ => ReflinkMode::Auto, // Default to auto
+    };
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
     let _has_forced_strategy = forced_strategy.is_some();
 
@@ -669,6 +683,7 @@ fn main() -> Result<()> {
         retry_count,
         retry_wait,
         checksum,
+        reflink,
         #[cfg(target_os = "linux")]
         linux_optimized,
         forced_strategy,
@@ -678,6 +693,7 @@ fn main() -> Result<()> {
         small_file_threshold,
         medium_file_threshold,
         large_file_threshold,
+        buffer_memory_fraction: None,
     };
 
     if !dry_run {
@@ -702,6 +718,12 @@ fn main() -> Result<()> {
                 println!("Files copied: {}", stats.files_copied());
                 println!("Files deleted: {}", stats.files_deleted());
                 println!("Bytes transferred: {}", stats.bytes_transferred());
+                let reflinks = stats.reflinks_succeeded();
+                let reflink_fallbacks = stats.reflinks_failed_fallback();
+                if reflinks > 0 || reflink_fallbacks > 0 {
+                    println!("Reflinks succeeded: {}", reflinks);
+                    println!("Reflinks fallback: {}", reflink_fallbacks);
+                }
                 println!("Errors: {}", stats.errors());
             }
         } else {
@@ -726,6 +748,12 @@ fn main() -> Result<()> {
                 println!("Files copied: {}", stats.files_copied());
                 println!("Files deleted: {}", stats.files_deleted());
                 println!("Bytes transferred: {}", stats.bytes_transferred());
+                let reflinks = stats.reflinks_succeeded();
+                let reflink_fallbacks = stats.reflinks_failed_fallback();
+                if reflinks > 0 || reflink_fallbacks > 0 {
+                    println!("Reflinks succeeded: {}", reflinks);
+                    println!("Reflinks fallback: {}", reflink_fallbacks);
+                }
                 println!("Errors: {}", stats.errors());
             }
         }

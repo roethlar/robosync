@@ -30,6 +30,8 @@ pub struct SyncStats {
     bytes_transferred: AtomicU64,
     blocks_matched: AtomicU64,
     errors: AtomicU64,
+    reflinks_succeeded: AtomicU64,
+    reflinks_failed_fallback: AtomicU64,
     pub elapsed_time: Duration,
     pub warnings: Arc<Mutex<Vec<String>>>,
     pub error_report_path: Option<PathBuf>,
@@ -163,6 +165,26 @@ impl SyncStats {
         self.blocks_matched.load(Ordering::Relaxed)
     }
 
+    /// Increment successful reflink count
+    pub fn add_reflink_success(&self) {
+        self.reflinks_succeeded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment failed reflink count (that fell back to regular copy)
+    pub fn add_reflink_fallback(&self) {
+        self.reflinks_failed_fallback.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get successful reflink count
+    pub fn reflinks_succeeded(&self) -> u64 {
+        self.reflinks_succeeded.load(Ordering::Relaxed)
+    }
+
+    /// Get failed reflink count
+    pub fn reflinks_failed_fallback(&self) -> u64 {
+        self.reflinks_failed_fallback.load(Ordering::Relaxed)
+    }
+
     /// Set error report path
     pub fn set_error_report_path(&mut self, path: PathBuf) {
         self.error_report_path = Some(path);
@@ -178,6 +200,8 @@ impl Clone for SyncStats {
             bytes_transferred: AtomicU64::new(self.bytes_transferred()),
             blocks_matched: AtomicU64::new(self.blocks_matched()),
             errors: AtomicU64::new(self.errors()),
+            reflinks_succeeded: AtomicU64::new(self.reflinks_succeeded()),
+            reflinks_failed_fallback: AtomicU64::new(self.reflinks_failed_fallback()),
             elapsed_time: self.elapsed_time,
             warnings: Arc::new(Mutex::new(self.get_warnings())),
             error_report_path: self.error_report_path.clone(),

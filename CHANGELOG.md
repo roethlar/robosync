@@ -2,6 +2,30 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [1.0.12] - 2025-08-04
+
+### Added
+- Progress feedback during file scanning phase - shows "X files found..." counter
+- Spinner with file count updates during source and destination enumeration
+
+### Fixed
+- Fixed critical bug where file enumeration could return stale entries for deleted files
+- Directory walkers now use fresh metadata instead of potentially cached metadata
+- This prevents "No such file or directory" errors when using --mir with files that were recently deleted
+
+## [1.0.11] - 2025-08-04
+
+### Added
+- Windows-specific optimization: FindFirstFileEx with FIND_FIRST_EX_LARGE_FETCH for 20-40% faster directory enumeration on NTFS
+- Automatic fallback to standard enumeration if Windows API fails
+
+### Fixed
+- Fixed critical bug where delete operations were using source paths instead of destination paths
+- This caused "file not found" errors when trying to delete files that only exist at the destination
+- Delete operations now correctly use target file paths for all file type mismatch scenarios
+- Fixed directory exclusion logic that was using substring matching instead of exact match
+- The --xd flag now correctly excludes only directories with exact name matches, not partial matches
+
 ## [1.0.10] - 2025-08-03
 
 ### Changed

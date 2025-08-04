@@ -140,7 +140,7 @@ where
             if e.file_type().is_dir() {
                 if let Some(name) = e.file_name().to_str() {
                     for pattern in &exclude_dirs {
-                        if name == pattern || name.contains(pattern) {
+                        if name == pattern {
                             return false; // Skip this directory and all its contents
                         }
                     }
@@ -345,9 +345,10 @@ pub fn generate_file_list_parallel(root: &Path, options: &SyncOptions) -> Result
                     }
 
                     // Get metadata
-                    let metadata = match entry.metadata() {
+                    // Use fresh metadata instead of potentially cached entry metadata
+                    let metadata = match std::fs::symlink_metadata(&path) {
                         Ok(m) => m,
-                        Err(_) => return None,
+                        Err(_) => return None, // File doesn't exist, skip it
                     };
 
                     let is_symlink = metadata.is_symlink();
@@ -681,7 +682,7 @@ where
                 } else if source_file.is_symlink && !target_file.is_symlink {
                     // Source is symlink, target is not - delete target and create symlink
                     operations.push(FileOperation::Delete {
-                        path: source_file.path.clone(),
+                        path: target_file.path.clone(),
                     });
                     if let Some(ref target) = source_file.symlink_target {
                         operations.push(FileOperation::CreateSymlink {
@@ -692,7 +693,7 @@ where
                 } else if !source_file.is_symlink && target_file.is_symlink {
                     // Source is not symlink, target is - delete symlink and create file/dir
                     operations.push(FileOperation::Delete {
-                        path: source_file.path.clone(),
+                        path: target_file.path.clone(),
                     });
                     if source_file.is_directory {
                         operations.push(FileOperation::CreateDirectory {
@@ -708,7 +709,7 @@ where
                 } else if source_file.is_directory && !target_file.is_directory {
                     // Source is directory, target is file - delete file and create directory
                     operations.push(FileOperation::Delete {
-                        path: source_file.path.clone(),
+                        path: target_file.path.clone(),
                     });
                     operations.push(FileOperation::CreateDirectory {
                         path: source_file.path.clone(),
@@ -716,7 +717,7 @@ where
                 } else if !source_file.is_directory && target_file.is_directory {
                     // Source is file, target is directory - delete directory and create file
                     operations.push(FileOperation::Delete {
-                        path: source_file.path.clone(),
+                        path: target_file.path.clone(),
                     });
                     operations.push(FileOperation::Create {
                         path: source_file.path.clone(),
@@ -838,7 +839,7 @@ pub fn compare_file_lists_with_options(
             } else if source_file.is_symlink && !target_file.is_symlink {
                 // Source is symlink, target is not - delete target and create symlink
                 operations.push(FileOperation::Delete {
-                    path: source_file.path.clone(),
+                    path: target_file.path.clone(),
                 });
                 if let Some(ref target) = source_file.symlink_target {
                     operations.push(FileOperation::CreateSymlink {
@@ -849,7 +850,7 @@ pub fn compare_file_lists_with_options(
             } else if !source_file.is_symlink && target_file.is_symlink {
                 // Source is not symlink, target is - delete symlink and create file/dir
                 operations.push(FileOperation::Delete {
-                    path: source_file.path.clone(),
+                    path: target_file.path.clone(),
                 });
                 if source_file.is_directory {
                     operations.push(FileOperation::CreateDirectory {
@@ -866,7 +867,7 @@ pub fn compare_file_lists_with_options(
             } else if source_file.is_directory && !target_file.is_directory {
                 // Source is directory, target is file - delete file and create directory
                 operations.push(FileOperation::Delete {
-                    path: source_file.path.clone(),
+                    path: target_file.path.clone(),
                 });
                 operations.push(FileOperation::CreateDirectory {
                     path: source_file.path.clone(),
@@ -874,7 +875,7 @@ pub fn compare_file_lists_with_options(
             } else if !source_file.is_directory && target_file.is_directory {
                 // Source is file, target is directory - delete directory and create file
                 operations.push(FileOperation::Delete {
-                    path: source_file.path.clone(),
+                    path: target_file.path.clone(),
                 });
                 operations.push(FileOperation::Create {
                     path: source_file.path.clone(),
@@ -1107,34 +1108,11 @@ mod tests {
 
         let options = SyncOptions {
             recursive: true,
-            purge: false,
-            mirror: false,
-            dry_run: false,
-            verbose: 0,
-            confirm: false,
-            show_progress: false,
-            move_files: false,
             exclude_files: vec!["*.tmp".to_string(), "*.log".to_string()],
             exclude_dirs: vec!["cache".to_string(), ".git".to_string()],
             min_size: Some(100),
             max_size: Some(10000),
-            copy_flags: "DAT".to_string(),
-            log_file: None,
-            compress: false,
-            compression_config: crate::compression::CompressionConfig::default(),
-            show_eta: false,
-            retry_count: 0,
-            retry_wait: 30,
-            checksum: false,
-            forced_strategy: None,
-            symlink_behavior: crate::options::SymlinkBehavior::Preserve,
-            no_report_errors: false,
-            debug: false,
-            small_file_threshold: None,
-            medium_file_threshold: None,
-            large_file_threshold: None,
-            #[cfg(target_os = "linux")]
-            linux_optimized: false,
+            ..Default::default()
         };
 
         let root = std::path::Path::new("/test");

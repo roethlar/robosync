@@ -109,7 +109,14 @@ impl StreamingDelta {
         let mut transferred_bytes = 0u64;
         let mut source_offset = 0u64;
 
-        let mut lookahead_buffer = vec![0u8; CHUNK_SIZE];
+        use crate::buffer_sizing::BufferSizer;
+        use crate::options::SyncOptions;
+
+        let options = SyncOptions::default(); // This will be replaced with actual options later
+        let buffer_sizer = BufferSizer::new(&options);
+        let buffer_size = buffer_sizer.calculate_buffer_size(source_size);
+
+        let mut lookahead_buffer = vec![0u8; buffer_size];
         let mut last_progress_report = std::time::Instant::now();
         let report_interval = std::time::Duration::from_secs(5);
 

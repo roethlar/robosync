@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -21,10 +22,12 @@ use crate::file_list::generate_file_list_parallel;
 #[cfg(target_os = "linux")]
 use crate::linux_fast_copy::IO_URING_BATCH_SIZE;
 use crate::logging::SyncLogger;
-use crate::metadata::{copy_file_with_metadata_with_warnings, CopyFlags};
+use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+use crate::reflink::ReflinkOptions;
 use crate::mixed_strategy::MixedStrategyExecutor;
 use crate::native_tools::NativeToolExecutor;
 use crate::options::SyncOptions;
+use crate::parallel_dirs::ParallelDirCreator;
 use crate::platform_api::PlatformCopier;
 use crate::progress::SyncProgress;
 use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
@@ -541,15 +544,34 @@ impl ParallelSyncer {
         // Show progress during source enumeration
         let source_files = if let Some(ref mp) = multi_progress {
             let source_pb = mp.add(ProgressBar::new_spinner());
-            source_pb.set_style(Self::create_progress_style(
-                "   {spinner:.green} Scanning source directory...",
-                "⠁⠂⠄⡀⢀⠠⠐⠈",
-            ));
+            source_pb.set_style(ProgressStyle::default_spinner()
+                .template("{spinner:.green} Scanning source: {msg}")
+                .expect("Failed to set progress style"));
             source_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
             // Enumerating source files
-            let files = generator.generate_file_list(source, options)?;
+            let source_pb_clone = source_pb.clone();
+            let file_count = Arc::new(AtomicUsize::new(0));
+            let file_count_clone = Arc::clone(&file_count);
+            
+            // Create a generator with progress tracking
+            let gen_with_progress = generator.clone().with_progress_interval(1000); // Update every 1000 files
+            
+            // Start a thread to update the progress bar
+            let progress_handle = std::thread::spawn(move || {
+                loop {
+                    let count = file_count_clone.load(Ordering::Relaxed);
+                    source_pb_clone.set_message(format!("{} files found...", count));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if source_pb_clone.is_finished() {
+                        break;
+                    }
+                }
+            });
+            
+            let files = gen_with_progress.generate_file_list_with_counter(source, options, Arc::clone(&file_count))?;
             source_pb.finish_with_message(format!("     ✅ Found {} source files", files.len()));
+            let _ = progress_handle.join();
 
             // Print newline to separate spinners
             let _ = mp.println("");
@@ -563,18 +585,37 @@ impl ParallelSyncer {
             if let Some(ref mp) = multi_progress {
                 // Show progress during destination enumeration
                 let dest_pb = mp.add(ProgressBar::new_spinner());
-                dest_pb.set_style(Self::create_progress_style(
-                    "   {spinner:.yellow} Scanning destination directory...",
-                    "⠁⠂⠄⡀⢀⠠⠐⠈",
-                ));
+                dest_pb.set_style(ProgressStyle::default_spinner()
+                    .template("{spinner:.yellow} Scanning destination: {msg}")
+                    .expect("Failed to set progress style"));
                 dest_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
                 // Enumerating destination files
-                let files = generator.generate_file_list(destination, options)?;
+                let dest_pb_clone = dest_pb.clone();
+                let dest_file_count = Arc::new(AtomicUsize::new(0));
+                let dest_file_count_clone = Arc::clone(&dest_file_count);
+                
+                // Create a generator with progress tracking
+                let gen_with_progress = generator.clone().with_progress_interval(1000); // Update every 1000 files
+                
+                // Start a thread to update the progress bar
+                let progress_handle = std::thread::spawn(move || {
+                    loop {
+                        let count = dest_file_count_clone.load(Ordering::Relaxed);
+                        dest_pb_clone.set_message(format!("{} files found...", count));
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if dest_pb_clone.is_finished() {
+                            break;
+                        }
+                    }
+                });
+                
+                let files = gen_with_progress.generate_file_list_with_counter(destination, options, Arc::clone(&dest_file_count))?;
                 dest_pb.finish_with_message(format!(
                     "     ✅ Found {} destination files",
                     files.len()
                 ));
+                let _ = progress_handle.join();
                 files
             } else {
                 generator.generate_file_list(destination, options)?
@@ -1276,27 +1317,75 @@ impl ParallelSyncer {
             .into_iter()
             .partition(|op| !matches!(op, FileOperation::Delete { .. }));
 
-        // Create directories first (sequentially to avoid race conditions)
+        // Create directories first using parallel creation
         if !dir_ops.is_empty() {
-            println!("DEBUG: Creating {} directories...", dir_ops.len());
+            println!("DEBUG: Creating {} directories in parallel...", dir_ops.len());
             if options.verbose >= 1 {
-                logger.log(&format!("Creating {} directories...", dir_ops.len()));
+                logger.log(&format!("Creating {} directories in parallel...", dir_ops.len()));
             }
-            for operation in dir_ops {
-                self.execute_operation(
-                    operation,
-                    source,
-                    destination,
-                    &stats,
-                    options,
-                    &mut logger,
-                )?;
-                logger.update_progress(1, 0);
-                if let Some(ref progress) = progress {
-                    if let Ok(mut p) = progress.lock() {
+            
+            // Extract directory paths from operations
+            let dir_paths: Vec<PathBuf> = dir_ops.iter()
+                .filter_map(|op| match op {
+                    FileOperation::CreateDirectory { path } => {
+                        Some(self.map_source_to_dest(path, source, destination).ok()?)
+                    }
+                    _ => None,
+                })
+                .collect();
+            
+            // Create progress bar for directory creation
+            let dir_progress = if let Some(ref mp) = multi_progress {
+                let pb = mp.add(indicatif::ProgressBar::new(dir_paths.len() as u64));
+                pb.set_style(
+                    indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} Creating directories: {pos}/{len} {bar:40.cyan/blue} {msg}")
+                        .unwrap()
+                        .progress_chars("=>-"),
+                );
+                Some(pb)
+            } else {
+                None
+            };
+            
+            // Use parallel directory creator
+            let dir_creator = ParallelDirCreator::new();
+            let (successes, errors) = dir_creator.create_directories(dir_paths, dir_progress.as_ref())?;
+            
+            // Update stats - count directories as processed files
+            for _ in 0..successes.len() {
+                stats.increment_files_processed();
+            }
+            
+            // Report errors if any
+            if !errors.is_empty() {
+                for (path, err) in &errors {
+                    logger.log(&format!("Failed to create directory {}: {}", path.display(), err));
+                }
+                if options.verbose >= 1 {
+                    logger.log(&format!(
+                        "Created {} directories successfully, {} errors",
+                        successes.len(),
+                        errors.len()
+                    ));
+                }
+            } else if options.verbose >= 1 {
+                logger.log(&format!("Created {} directories successfully", successes.len()));
+            }
+            
+            // Update overall progress
+            logger.update_progress(dir_ops.len() as u64, 0);
+            if let Some(ref progress) = progress {
+                if let Ok(mut p) = progress.lock() {
+                    for _ in 0..dir_ops.len() {
                         p.update_file_complete(0);
                     }
                 }
+            }
+            
+            // Remove progress bar
+            if let Some(pb) = dir_progress {
+                pb.finish_and_clear();
             }
         }
 
@@ -2032,11 +2121,15 @@ impl ParallelSyncer {
 
                 // Parse copy flags and copy file with metadata
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                let bytes_copied = copy_file_with_metadata_with_warnings(
+                let reflink_options = ReflinkOptions {
+                    mode: options.reflink,
+                };
+                let bytes_copied = copy_file_with_metadata_and_reflink(
                     &path,
                     &dest_path,
                     &copy_flags,
-                    &stats.warnings,
+                    &reflink_options,
+                    Some(&stats),
                 )?;
 
                 // If move mode is enabled, delete source file after successful copy
@@ -2094,11 +2187,15 @@ impl ParallelSyncer {
                 // } else {
                 // Parse copy flags and copy file with metadata
                 let copy_flags = CopyFlags::from_string(&options.copy_flags);
-                let bytes_copied = copy_file_with_metadata_with_warnings(
+                let reflink_options = ReflinkOptions {
+                    mode: options.reflink,
+                };
+                let bytes_copied = copy_file_with_metadata_and_reflink(
                     &path,
                     &dest_path,
                     &copy_flags,
-                    &stats.warnings,
+                    &reflink_options,
+                    Some(&stats),
                 )?;
 
                 // If move mode is enabled, delete source file after successful copy
