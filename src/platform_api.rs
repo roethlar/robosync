@@ -275,9 +275,9 @@ impl PlatformCopier {
         let total_size = metadata.len();
 
         // copyfile flags
-        const COPYFILE_ALL: u32 = 0x0001;
-        const COPYFILE_EXCL: u32 = 0x0002;
-        const COPYFILE_NOFOLLOW: u32 = 0x0004;
+        const COPYFILE_DATA: u32 = 0x0002;
+        const COPYFILE_METADATA: u32 = 0x0004;
+        const COPYFILE_NOFOLLOW: u32 = 0x0001;
 
         // Link to copyfile
         #[link(name = "c")]
@@ -295,7 +295,7 @@ impl PlatformCopier {
                 source_cstr.as_ptr(),
                 dest_cstr.as_ptr(),
                 std::ptr::null_mut(),
-                COPYFILE_ALL | COPYFILE_NOFOLLOW,
+                COPYFILE_DATA | COPYFILE_METADATA | COPYFILE_NOFOLLOW,
             )
         };
 

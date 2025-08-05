@@ -103,7 +103,7 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
     error_reporter: Option<&ErrorReportHandle>,
 ) -> Result<u64> {
     // Check if source is a symlink first
-    let source_metadata = crate::metadata_cache::MetadataCache::get_symlink_metadata(source)
+    let source_metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
 
     if source_metadata.is_symlink() {
@@ -145,7 +145,7 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
     };
 
     // Now apply metadata - these are less critical and some may fail due to permissions
-    let metadata = crate::metadata_cache::MetadataCache::get_metadata(source)
+    let metadata = std::fs::metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
 
     // Apply each type of metadata, but don't fail the whole operation for non-critical errors

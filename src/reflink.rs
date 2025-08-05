@@ -131,8 +131,13 @@ pub fn try_reflink(src: &Path, dst: &Path, options: &ReflinkOptions) -> ReflinkR
             };
         }
         Err(e) => {
-            // Error checking filesystem - treat as hard error
-            return ReflinkResult::Error(e.into());
+            // Error checking filesystem - for Auto mode, treat as fallback
+            // This handles cases where destination doesn't exist yet
+            return if options.mode == ReflinkMode::Always {
+                ReflinkResult::Error(e.into())
+            } else {
+                ReflinkResult::Fallback  
+            };
         }
         Ok(true) => {} // Same filesystem - continue
     }
@@ -140,7 +145,14 @@ pub fn try_reflink(src: &Path, dst: &Path, options: &ReflinkOptions) -> ReflinkR
     // Get filesystem info to check reflink support
     let fs_info = match get_filesystem_info(src) {
         Ok(info) => info,
-        Err(e) => return ReflinkResult::Error(e.into()),
+        Err(e) => {
+            // Error getting filesystem info - for Auto mode, treat as fallback
+            return if options.mode == ReflinkMode::Always {
+                ReflinkResult::Error(e.into())
+            } else {
+                ReflinkResult::Fallback
+            };
+        }
     };
 
     // Check if filesystem supports reflinks

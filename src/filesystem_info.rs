@@ -68,8 +68,7 @@ fn get_filesystem_info_unix(path: &Path) -> Result<FilesystemInfo, io::Error> {
     #[cfg(target_os = "macos")]
     let fs_type = {
         // macOS uses string-based filesystem type names
-        let fs_type_name = std::str::from_utf8(&stat.filesystem_type_name())
-            .unwrap_or("unknown")
+        let fs_type_name = stat.filesystem_type_name()
             .trim_end_matches('\0');
         match fs_type_name {
             "apfs" => FilesystemType::Apfs,
@@ -83,8 +82,7 @@ fn get_filesystem_info_unix(path: &Path) -> Result<FilesystemInfo, io::Error> {
     #[cfg(target_os = "freebsd")]
     let fs_type = {
         // FreeBSD also uses string-based names
-        let fs_type_name = std::str::from_utf8(&stat.filesystem_type_name())
-            .unwrap_or("unknown")
+        let fs_type_name = stat.filesystem_type_name()
             .trim_end_matches('\0');
         match fs_type_name {
             "zfs" => FilesystemType::Zfs,

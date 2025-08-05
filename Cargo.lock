@@ -1127,6 +1127,7 @@ dependencies = [
  "memmap2",
  "nix",
  "num_cpus",
+ "parking_lot",
  "rayon",
  "serde",
  "serde_json",
