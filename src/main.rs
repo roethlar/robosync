@@ -93,8 +93,9 @@ fn get_max_thread_count() -> usize {
     }
 }
 
-fn main() -> Result<()> {
-    let matches = Command::new("RoboSync")
+/// Build the command-line interface
+fn build_cli() -> Command {
+    Command::new("RoboSync")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Fast, parallel file synchronization with delta-transfer algorithm")
         .arg(
@@ -295,108 +296,94 @@ fn main() -> Result<()> {
             Arg::new("medium-file-threshold")
                 .long("medium-threshold")
                 .value_name("SIZE")
-                .help("Size threshold for medium files in bytes (default: 10485760 / 10MB). Files up to this size use platform-specific APIs.")
+                .help("Size threshold for medium files in bytes (default: 16777216 / 16MB). Files between small and medium thresholds use optimized delta transfer.")
                 .value_parser(clap::value_parser!(u64))
         )
         .arg(
             Arg::new("large-file-threshold")
                 .long("large-threshold")
                 .value_name("SIZE")
-                .help("Size threshold for large files in bytes (default: 104857600 / 100MB). Files above this use delta transfer.")
+                .help("Size threshold for large files in bytes (default: 104857600 / 100MB). Files above this use memory-mapped I/O and parallel chunks.")
                 .value_parser(clap::value_parser!(u64))
         )
 
-        // Legacy rsync options
-        .arg(
-            Arg::new("archive")
-                .short('a')
-                .short_alias('A')
-                .long("archive")
-                .help("Archive mode - preserve everything (permissions, timestamps, ownership)")
-                .action(clap::ArgAction::SetTrue)
-        )
-        // Note: -r is already used for retry-count, using long form only
+        // Special options
         .arg(
             Arg::new("recursive")
                 .long("recursive")
-                .help("Recurse into directories")
+                .help("Copy directories recursively (automatically enabled for directory sources)")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("archive")
+                .short('a')
+                .long("archive")
+                .help("Archive mode - equivalent to -rlptgoD (recursive, links, perms, times, group, owner, devices)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("compress")
                 .short('z')
-                .long("compress")
-                .help("Compress file data during transfer")
+                .short_alias('Z')
+                .help("Enable compression during transfer (useful for text files or slow networks)")
                 .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("dry-run")
+                .short('n')
+                .short_alias('N')
+                .long("dry-run")
+                .help("Perform a trial run with no changes made")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("checksum")
+                .short('c')
+                .short_alias('C')
+                .help("Use checksums to determine if files should be updated (slower but accurate)")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("no-smart")
+                .long("no-smart")
+                .help("Disable smart strategy selection (force simple delta mode)")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("strategy")
+                .long("strategy")
+                .value_name("MODE")
+                .help("Force a specific sync strategy: simple, delta, batch, parallel, or mixed")
+                .value_parser(["simple", "delta", "batch", "parallel", "mixed"])
+        )
+
+        // Linux-specific options
+        .arg(
+            Arg::new("linux-optimized")
+                .long("linux-optimized")
+                .help("Enable Linux-specific optimizations (splice, io_uring, etc.)")
+                .action(clap::ArgAction::SetTrue)
+                .hide(cfg!(not(target_os = "linux")))
         )
 
         // Symlink handling options
         .arg(
             Arg::new("links")
                 .long("links")
-                .help("Copy symlinks as symlinks (default behavior)")
+                .help("Preserve symlinks (default behavior)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("deref")
                 .long("deref")
-                .help("Dereference symlinks - copy the target file/directory instead of the symlink")
+                .help("Dereference symlinks - copy the files they point to")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("no-links")
                 .long("no-links")
-                .help("Skip symlinks entirely - do not copy symlinks or their targets")
+                .help("Skip all symlinks")
                 .action(clap::ArgAction::SetTrue)
-        );
-
-    #[cfg(target_os = "linux")]
-    let matches = matches.arg(
-        Arg::new("linux-optimized")
-            .long("linux-optimized")
-            .help("Enable Linux-specific optimizations for small files")
-            .action(clap::ArgAction::SetTrue)
-            .hide(true),
-    );
-
-    #[cfg(not(target_os = "linux"))]
-    let matches = matches;
-
-    let matches = matches.arg(
-        Arg::new("no-smart")
-            .long("no-smart")
-            .help("Diagnostic: use basic parallel mode instead of mixed mode")
-            .action(clap::ArgAction::SetTrue)
-            .hide(true),
-    );
-
-    let matches = matches.arg(
-            Arg::new("strategy")
-                .long("strategy")
-                .value_name("METHOD")
-                .help("Diagnostic override: force a specific strategy (delta, mixed, rsync, robocopy, platform)")
-                .value_parser(["delta", "mixed", "rsync", "robocopy", "platform", "io_uring", "parallel"])
-                .hide(true),
-        );
-
-    let matches = matches
-        .arg(
-            Arg::new("dry-run")
-                .short('n')
-                .short_alias('N')
-                .long("dry-run")
-                .alias("dryrun")
-                .help("Show what would be done without actually doing it")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("checksum")
-                .short('c')
-                .long("checksum")
-                .alias("Checksum")
-                .alias("CHECKSUM")
-                .help("Skip based on checksum, not mod-time & size")
-                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("reflink")
@@ -406,11 +393,28 @@ fn main() -> Result<()> {
                 .value_parser(["always", "auto", "never"])
                 .default_value("auto"),
         )
-        .get_matches();
+        .arg(
+            Arg::new("enterprise")
+                .long("enterprise")
+                .help("Enable enterprise mode with maximum reliability (integrity verification, atomic operations, audit trails)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("verify-integrity")
+                .long("verify-integrity")
+                .help("Verify data integrity with checksums after each copy operation")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("atomic-operations")
+                .long("atomic-operations") 
+                .help("Use atomic file operations to prevent corruption (enterprise feature)")
+                .action(clap::ArgAction::SetTrue),
+        )
+}
 
-    // Load config from .robosync.toml if it exists
-    let config = load_config()?.unwrap_or_default();
-
+/// Parse command-line arguments and build SyncOptions
+fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Config) -> Result<(PathBuf, PathBuf, SyncOptions, usize, usize)> {
     // For regular sync operations, source and destination are required
     let source_arg: PathBuf = matches
         .get_one::<PathBuf>("source")
@@ -445,6 +449,9 @@ fn main() -> Result<()> {
     let checksum = matches.get_flag("checksum");
     let debug = matches.get_flag("debug");
     let no_smart = matches.get_flag("no-smart");
+    let enterprise_mode = matches.get_flag("enterprise");
+    let verify_integrity = matches.get_flag("verify-integrity") || enterprise_mode;
+    let atomic_operations = matches.get_flag("atomic-operations") || enterprise_mode;
     let _smart_mode = !no_smart; // Smart mode is now default (unused but kept for clarity)
     let reflink = match matches.get_one::<String>("reflink").map(|s| s.as_str()) {
         Some("always") => ReflinkMode::Always,
@@ -452,7 +459,6 @@ fn main() -> Result<()> {
         _ => ReflinkMode::Auto, // Default to auto
     };
     let forced_strategy = matches.get_one::<String>("strategy").cloned();
-    let _has_forced_strategy = forced_strategy.is_some();
 
     // Parse symlink handling options
     let links = matches.get_flag("links");
@@ -507,8 +513,8 @@ fn main() -> Result<()> {
         .unwrap_or_default()
         .cloned()
         .collect();
-    if let Some(config_exclude_dirs) = config.exclude_dirs {
-        exclude_dirs.extend(config_exclude_dirs);
+    if let Some(config_exclude_dirs) = &config.exclude_dirs {
+        exclude_dirs.extend(config_exclude_dirs.clone());
     }
     let min_size = matches.get_one::<u64>("min-size").copied();
     let max_size = matches.get_one::<u64>("max-size").copied();
@@ -556,103 +562,6 @@ fn main() -> Result<()> {
     let retry_count = matches.get_one::<u32>("retry-count").copied().unwrap_or(0);
     let retry_wait = matches.get_one::<u32>("retry-wait").copied().unwrap_or(30);
 
-    // Print header without lines
-    if !show_progress {
-        println!(
-            "{} v{}: {}",
-            "RoboSync".color_bold_if(Color::Cyan),
-            env!("CARGO_PKG_VERSION").color_if(Color::White),
-            "Fast parallel file synchronization".color_if(Color::White)
-        );
-    }
-
-    // Calculate the max width needed for all content
-    let source_str = source.display().to_string();
-    let dest_str = destination.display().to_string();
-
-    // Build options string
-    let mut all_options = Vec::new();
-    if mirror {
-        all_options.push("--mir".to_string());
-    } else if empty_dirs {
-        all_options.push("-e".to_string());
-    } else if subdirs {
-        all_options.push("-s".to_string());
-    }
-    if archive {
-        all_options.push("-a".to_string());
-    }
-    if compress {
-        all_options.push("-z".to_string());
-    }
-    if checksum {
-        all_options.push("-c".to_string());
-    }
-    if move_files {
-        all_options.push("--mov".to_string());
-    }
-    if dry_run {
-        all_options.push("-n".to_string());
-    }
-    if verbose > 0 {
-        all_options.push(format!("-{}", "v".repeat(verbose as usize)));
-    }
-    if threads != num_cpus {
-        all_options.push(format!("--mt {threads}"));
-    }
-    if retry_count > 0 {
-        all_options.push(format!("-r {retry_count} -w {retry_wait}"));
-    }
-    if copy_all || archive {
-        all_options.push("--copyall".to_string());
-    } else if copy_flags != "DAT" {
-        all_options.push(format!("--copy {copy_flags}"));
-    }
-
-    // Add exclude patterns to options
-    for excl in &exclude_files {
-        all_options.push(format!("--xf {excl}"));
-    }
-    for excl in &exclude_dirs {
-        all_options.push(format!("--xd {excl}"));
-    }
-
-    let options_str = all_options.join(" ");
-
-    // Find max width needed
-    let max_len = source_str.len().max(dest_str.len()).max(options_str.len());
-    let _table_width = max_len.max(44) + 2; // At least 44 chars, plus padding
-
-    // Display configuration
-    if !show_progress {
-        println!();
-        println!(
-            "{}  {}",
-            "Source:".color_if(Color::White),
-            source_str.as_str().color_if(Color::Green)
-        );
-        println!(
-            "{}    {}",
-            "Dest:".color_if(Color::White),
-            dest_str.as_str().color_if(Color::Yellow)
-        );
-        if !options_str.is_empty() {
-            println!(
-                "{} {}",
-                "Options:".color_if(Color::White),
-                options_str.as_str().color_if(Color::DarkGrey)
-            );
-        }
-    }
-
-    // Warn about dangerous combinations
-    if move_files && mirror {
-        eprintln!("  ⚠️  WARNING: Using --mov with --mir is dangerous!");
-        eprintln!("If the sync is interrupted, source files already moved will be lost.");
-        eprintln!("Consider using --mir without --mov for safety.");
-        eprintln!();
-    }
-
     // Create sync options struct
     let sync_options = SyncOptions {
         recursive,
@@ -690,13 +599,124 @@ fn main() -> Result<()> {
         symlink_behavior,
         no_report_errors,
         debug,
+        enterprise_mode,
+        verify_integrity,
+        atomic_operations,
         small_file_threshold,
         medium_file_threshold,
         large_file_threshold,
         buffer_memory_fraction: None,
     };
 
-    if !dry_run {
+    Ok((source, destination, sync_options, threads, block_size))
+}
+
+/// Display sync configuration and warnings
+fn display_sync_info(source: &PathBuf, destination: &PathBuf, sync_options: &SyncOptions, threads: usize) {
+    // Print header without lines
+    if !sync_options.show_progress {
+        println!(
+            "{} v{}: {}",
+            "RoboSync".color_bold_if(Color::Cyan),
+            env!("CARGO_PKG_VERSION").color_if(Color::White),
+            "Fast parallel file synchronization".color_if(Color::White)
+        );
+    }
+
+    // Calculate the max width needed for all content
+    let source_str = source.display().to_string();
+    let dest_str = destination.display().to_string();
+
+    // Build options string
+    let mut all_options = Vec::new();
+    if sync_options.mirror {
+        all_options.push("--mir".to_string());
+    } else if sync_options.recursive && source.is_dir() {
+        if sync_options.copy_flags.contains('A') {
+            all_options.push("-e".to_string());
+        } else {
+            all_options.push("-s".to_string());
+        }
+    }
+    if sync_options.compress {
+        all_options.push("-z".to_string());
+    }
+    if sync_options.checksum {
+        all_options.push("-c".to_string());
+    }
+    if sync_options.move_files {
+        all_options.push("--mov".to_string());
+    }
+    if sync_options.dry_run {
+        all_options.push("-n".to_string());
+    }
+    if sync_options.verbose > 0 {
+        all_options.push(format!("-{}", "v".repeat(sync_options.verbose as usize)));
+    }
+    let num_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    if threads != num_cpus {
+        all_options.push(format!("--mt {threads}"));
+    }
+    if sync_options.retry_count > 0 {
+        all_options.push(format!("-r {} -w {}", sync_options.retry_count, sync_options.retry_wait));
+    }
+    if sync_options.copy_flags == "DATSOU" {
+        all_options.push("--copyall".to_string());
+    } else if sync_options.copy_flags != "DAT" {
+        all_options.push(format!("--copy {}", sync_options.copy_flags));
+    }
+
+    // Add exclude patterns to options
+    for excl in &sync_options.exclude_files {
+        all_options.push(format!("--xf {excl}"));
+    }
+    for excl in &sync_options.exclude_dirs {
+        all_options.push(format!("--xd {excl}"));
+    }
+
+    let options_str = all_options.join(" ");
+
+    // Display configuration
+    if !sync_options.show_progress {
+        println!();
+        println!(
+            "{}  {}",
+            "Source:".color_if(Color::White),
+            source_str.as_str().color_if(Color::Green)
+        );
+        println!(
+            "{}    {}",
+            "Dest:".color_if(Color::White),
+            dest_str.as_str().color_if(Color::Yellow)
+        );
+        if !options_str.is_empty() {
+            println!(
+                "{} {}",
+                "Options:".color_if(Color::White),
+                options_str.as_str().color_if(Color::DarkGrey)
+            );
+        }
+    }
+
+    // Warn about dangerous combinations
+    if sync_options.move_files && sync_options.mirror {
+        eprintln!("  ⚠️  WARNING: Using --mov with --mir is dangerous!");
+        eprintln!("If the sync is interrupted, source files already moved will be lost.");
+        eprintln!("Consider using --mir without --mov for safety.");
+        eprintln!();
+    }
+
+    // Show enterprise mode notification
+    if sync_options.enterprise_mode && sync_options.verbose > 0 {
+        eprintln!("🔒 Enterprise mode enabled: Data integrity verification, atomic operations, and audit trails active");
+    }
+}
+
+/// Execute the synchronization
+fn execute_sync(source: PathBuf, destination: PathBuf, sync_options: SyncOptions, threads: usize, block_size: usize) -> Result<()> {
+    if !sync_options.dry_run {
         if sync_options.forced_strategy.is_some() {
             // Diagnostic override - use legacy smart mode with specific strategy
             let config = ParallelSyncConfig {
@@ -714,17 +734,7 @@ fn main() -> Result<()> {
 
             // Print summary statistics when not using progress bar
             if !sync_options.show_progress {
-                println!("\nSummary:");
-                println!("Files copied: {}", stats.files_copied());
-                println!("Files deleted: {}", stats.files_deleted());
-                println!("Bytes transferred: {}", stats.bytes_transferred());
-                let reflinks = stats.reflinks_succeeded();
-                let reflink_fallbacks = stats.reflinks_failed_fallback();
-                if reflinks > 0 || reflink_fallbacks > 0 {
-                    println!("Reflinks succeeded: {}", reflinks);
-                    println!("Reflinks fallback: {}", reflink_fallbacks);
-                }
-                println!("Errors: {}", stats.errors());
+                print_sync_summary(&stats);
             }
         } else {
             // Default: mixed mode (optimal for all scenarios)
@@ -744,17 +754,7 @@ fn main() -> Result<()> {
 
             // Print summary statistics when not using progress bar
             if !sync_options.show_progress {
-                println!("\nSummary:");
-                println!("Files copied: {}", stats.files_copied());
-                println!("Files deleted: {}", stats.files_deleted());
-                println!("Bytes transferred: {}", stats.bytes_transferred());
-                let reflinks = stats.reflinks_succeeded();
-                let reflink_fallbacks = stats.reflinks_failed_fallback();
-                if reflinks > 0 || reflink_fallbacks > 0 {
-                    println!("Reflinks succeeded: {}", reflinks);
-                    println!("Reflinks fallback: {}", reflink_fallbacks);
-                }
-                println!("Errors: {}", stats.errors());
+                print_sync_summary(&stats);
             }
         }
     } else {
@@ -762,6 +762,39 @@ fn main() -> Result<()> {
         sync::synchronize_with_options(source, destination, threads, sync_options)?;
     }
 
+    Ok(())
+}
+
+/// Print synchronization summary
+fn print_sync_summary(stats: &robosync::sync_stats::SyncStats) {
+    println!("\nSummary:");
+    println!("Files copied: {}", stats.files_copied());
+    println!("Files deleted: {}", stats.files_deleted());
+    println!("Bytes transferred: {}", stats.bytes_transferred());
+    let reflinks = stats.reflinks_succeeded();
+    let reflink_fallbacks = stats.reflinks_failed_fallback();
+    if reflinks > 0 || reflink_fallbacks > 0 {
+        println!("Reflinks succeeded: {}", reflinks);
+        println!("Reflinks fallback: {}", reflink_fallbacks);
+    }
+    println!("Errors: {}", stats.errors());
+}
+
+fn main() -> Result<()> {
+    let matches = build_cli().get_matches();
+    
+    // Load config from .robosync.toml if it exists
+    let config = load_config()?.unwrap_or_default();
+    
+    // Parse options
+    let (source, destination, sync_options, threads, block_size) = parse_sync_options(&matches, &config)?;
+    
+    // Display sync info
+    display_sync_info(&source, &destination, &sync_options, threads);
+    
+    // Execute sync
+    execute_sync(source, destination, sync_options, threads, block_size)?;
+    
     Ok(())
 }
 
