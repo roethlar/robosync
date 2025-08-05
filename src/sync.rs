@@ -1,10 +1,10 @@
 //! Main synchronization logic
 
-use crate::algorithm::{DeltaAlgorithm, Match};
 use crate::file_list::{
     compare_file_lists_with_roots, generate_file_list_with_options, FileOperation,
 };
 use crate::logging::SyncLogger;
+use crate::network_fs::{NetworkFsDetector, NetworkFsType};
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
 use anyhow::{Context, Result};
@@ -24,6 +24,47 @@ pub fn synchronize(
     logger.log("Starting synchronization...");
     logger.log(&format!("  Source: {}", source.display()));
     logger.log(&format!("  Destination: {}", destination.display()));
+
+    // Detect network filesystem types for optimization
+    let mut fs_detector = NetworkFsDetector::new();
+    let src_fs_info = fs_detector.detect_filesystem(&source);
+    let dst_fs_info = fs_detector.detect_filesystem(&destination);
+
+    // Log filesystem information
+    if src_fs_info.fs_type != NetworkFsType::Local {
+        logger.log(&format!("  Source filesystem: {:?} ({})", 
+            src_fs_info.fs_type, src_fs_info.mount_point));
+        if let Some(server) = &src_fs_info.server {
+            logger.log(&format!("    Server: {}", server));
+        }
+    }
+    
+    if dst_fs_info.fs_type != NetworkFsType::Local {
+        logger.log(&format!("  Destination filesystem: {:?} ({})", 
+            dst_fs_info.fs_type, dst_fs_info.mount_point));
+        if let Some(server) = &dst_fs_info.server {
+            logger.log(&format!("    Server: {}", server));
+        }
+    }
+
+    // Provide optimization recommendations
+    if src_fs_info.fs_type != NetworkFsType::Local || dst_fs_info.fs_type != NetworkFsType::Local {
+        logger.log("Network filesystem detected - optimization recommendations:");
+        
+        if src_fs_info.fs_type != NetworkFsType::Local {
+            let recommendations = fs_detector.get_optimization_recommendations(&src_fs_info);
+            for rec in recommendations {
+                logger.log(&format!("  Source: {}", rec));
+            }
+        }
+        
+        if dst_fs_info.fs_type != NetworkFsType::Local {
+            let recommendations = fs_detector.get_optimization_recommendations(&dst_fs_info);
+            for rec in recommendations {
+                logger.log(&format!("  Destination: {}", rec));
+            }
+        }
+    }
 
     // Create destination if it doesn't exist
     if !destination.exists() {
@@ -83,6 +124,20 @@ pub fn synchronize_with_options(
     _threads: usize,
     mut options: SyncOptions,
 ) -> Result<()> {
+    // Fast path for small files scenario - bypass most overhead
+    if !options.purge && source.is_dir() && crate::small_file_optimizer::is_small_files_scenario(&source).unwrap_or(false) {
+        if options.show_progress {
+            println!("Fast path for small files detected");
+        }
+        let stats = crate::small_file_optimizer::sync_small_files_fast(&source, &destination)?;
+        if options.show_progress {
+            println!("Files copied: {}", stats.files_copied());
+            println!("Bytes transferred: {}", stats.bytes_transferred());
+            println!("Time: {:?}", stats.elapsed_time);
+        }
+        return Ok(());
+    }
+
     // Create logger with optional log file
     let logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
 
@@ -198,7 +253,7 @@ pub fn synchronize_with_options(
     Ok(())
 }
 
-/// Synchronize a single file using delta algorithm
+/// Synchronize a single file using optimized copy paths
 fn sync_single_file(source: &Path, destination: &Path, logger: &SyncLogger) -> Result<()> {
     logger.log(&format!(
         "Syncing file: {} -> {}",
@@ -206,101 +261,45 @@ fn sync_single_file(source: &Path, destination: &Path, logger: &SyncLogger) -> R
         destination.display()
     ));
 
-    let source_data = fs::read(source)
-        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-
-    if !destination.exists() {
-        // Destination doesn't exist, just copy the file
-        if let Some(parent) = destination.parent() {
+    // Create parent directory if needed
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create parent directory: {}", parent.display())
             })?;
         }
-
-        fs::write(destination, &source_data).with_context(|| {
-            format!(
-                "Failed to write destination file: {}",
-                destination.display()
-            )
-        })?;
-
-        logger.log(&format!("  Copied {} bytes (new file)", source_data.len()));
-        return Ok(());
     }
 
-    // Destination exists, use delta algorithm
-    let dest_data = fs::read(destination)
-        .with_context(|| format!("Failed to read destination file: {}", destination.display()))?;
-
-    let algorithm = DeltaAlgorithm::default();
-
-    // Generate checksums for destination (target) blocks
-    let checksums = algorithm
-        .generate_checksums(&dest_data)
-        .context("Failed to generate checksums for destination")?;
-
-    // Find matches between source and destination
-    let matches = algorithm
-        .find_matches(&source_data, &checksums)
-        .context("Failed to find matches")?;
-
-    // Apply the delta to reconstruct the file
-    let new_data = apply_delta(&dest_data, &matches)?;
-
-    // Write the updated file
-    fs::write(destination, &new_data)
-        .with_context(|| format!("Failed to write updated file: {}", destination.display()))?;
-
-    // Calculate transfer statistics
-    let literal_bytes: usize = matches
-        .iter()
-        .filter_map(|m| match m {
-            Match::Literal { data, .. } => Some(data.len()),
-            _ => None,
-        })
-        .sum();
-
-    let block_matches = matches
-        .iter()
-        .filter(|m| matches!(m, Match::Block { .. }))
-        .count();
-
-    logger.log(&format!(
-        "  Transferred {literal_bytes} bytes ({literal_bytes} literal, {block_matches} block matches)"
-    ));
-
-    Ok(())
-}
-
-/// Apply delta matches to reconstruct a file
-fn apply_delta(dest_data: &[u8], matches: &[Match]) -> Result<Vec<u8>> {
-    let mut result = Vec::new();
-
-    for match_item in matches {
-        match match_item {
-            Match::Literal { data, .. } => {
-                result.extend_from_slice(data);
-            }
-            Match::Block {
-                target_offset,
-                length,
-                ..
-            } => {
-                let start = *target_offset as usize;
-                let end = start + length;
-                if end <= dest_data.len() {
-                    result.extend_from_slice(&dest_data[start..end]);
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Block match extends beyond destination data"
-                    ));
-                }
-            }
+    // Use the optimized copy function that supports reflinks, mmap, etc.
+    use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+    use crate::reflink::ReflinkOptions;
+    use crate::sync_stats::SyncStats;
+    
+    let stats = SyncStats::default();
+    let copy_flags = CopyFlags::default(); // DAT by default
+    let reflink_options = ReflinkOptions::default(); // Auto mode
+    
+    match copy_file_with_metadata_and_reflink(
+        source,
+        destination,
+        &copy_flags,
+        &reflink_options,
+        Some(&stats),
+    ) {
+        Ok(bytes_copied) => {
+            logger.log(&format!("  Copied {} bytes", bytes_copied));
+            logger.log(&format!("  Files copied: {}", stats.files_copied()));
+            logger.log(&format!("  Total bytes transferred: {}", stats.bytes_transferred()));
+            Ok(())
+        }
+        Err(e) => {
+            logger.log(&format!("  Error copying file: {}", e));
+            Err(e)
         }
     }
-
-    Ok(result)
 }
+
+
 
 /// Synchronize directories recursively
 fn sync_directories(
@@ -558,33 +557,6 @@ mod tests {
 
         let dest_content = fs::read(&dest)?;
         assert_eq!(dest_content, b"Hello, World!");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_apply_delta() -> Result<()> {
-        let dest_data = b"Hello, World!";
-        let matches = vec![
-            Match::Block {
-                source_offset: 0,
-                target_offset: 0,
-                length: 5,
-            }, // "Hello"
-            Match::Literal {
-                offset: 5,
-                data: b" Rust".to_vec(),
-                is_compressed: false,
-            }, // " Rust"
-            Match::Block {
-                source_offset: 10,
-                target_offset: 5,
-                length: 8,
-            }, // ", World!"
-        ];
-
-        let result = apply_delta(dest_data, &matches)?;
-        assert_eq!(result, b"Hello Rust, World!");
 
         Ok(())
     }
