@@ -1,128 +1,163 @@
-/target
-# Cargo.lock - KEEP for binary crates!
-*.bak
-.DS_Store
+# Build artifacts
+/target/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+
+# Keep Cargo.lock for binary crates
+# Cargo.lock
+
+# IDE and editor files
 .vscode/
 .idea/
-*.tmp
-.crush/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
 
-# Test artifacts
+# Test directories and files
+test_*/
+*_test/
+*_test_*/
+tests_temp/
+test_temp/
+test_data/
+test_results/
+benchmark_results/
+perf_*/
+quick_perf*/
+np_test*/
+mac_test*/
+truenas_test_scripts/
+
+# Test scripts (not for distribution)
+test_*.sh
+*_test.sh
+*_benchmark.sh
+*_perf.sh
+benchmark_*.sh
+comprehensive_*.sh
+investigate_*.sh
+profile_*.sh
+quick_benchmark.sh
+
+# Test output files
 test_results.md
-test_all_options.sh
-test_*
-debug_*
-deletion_test/
-
-# Session/context files
-*session*.txt
-*context*.txt
-*archive*.txt
-*grok*.txt
-coordination.json
-grok.txt
-*Session_gemini*.json
-*_responses.txt
-*_suggestions.txt
-
-# Editor/AI assistant files
-.grok/
-.claude/
-claude-suggestions.md
-lint_report.md
-# CLAUDE.md - KEEP THIS! Critical rules file
-LINTING_REPORT.md
-CRUSH.md
-GITHUB_READY.md
+test_*.txt
+benchmark_*.txt
+benchmark_results_*.txt
+perf_*.txt
+*.log
 
 # Temporary files
 *.tmp
 *.temp
-*.log
-clippy.log
+*.bak
+*.orig
+tmp/
+# temp/ - KEEP THIS FOLDER
+cache/
+.cache/
+
+# Development scripts (not for distribution)
+scripts/
+build_*.sh
+build_*.bat
+release_*.sh
+package_*.sh
+
+# Package manager local files (not for distribution)
+package-managers/
+homebrew-tap/
+aur-package/
+snap/
+winget-pkgs/
+*.nuspec
+*.nix
+*.yaml
+tools/
+
+# Documentation drafts and notes
+*TODO*.md
+*STATUS*.md
+URGENT_*.md
+RELEASE_*.md
+*_RELEASE*.md
+HOMEBREW_SUBMISSION.md
+WINGET_SUBMISSION.md
+LINTING_REPORT.md
+CRUSH.md
+GITHUB_READY.md
+ai-*.md
+*gemini*.md
+*claude*.md
+*roboclaude*.md
+*responses*.md
+*suggestions*.md
+lint_report.md
+windows_benchmark_report.md
+
+# Coordination and session files
+coordination/
+shared.json
+coordination.json
+*session*.txt
+*context*.txt
+*archive*.txt
+*grok*.txt
+chatlog.txt
+
+# AI assistant directories
+.grok/
+.claude/
+.crush/
 
 # Error reports
 robosync_errors_*.txt
 robosync_errors_*.log
+errors_*.txt
 
-# Test data and performance files
-perf_*/
-quick_perf*/
-*_test_*/
-np_test_*/
-
-# Coordination files (development artifacts)
-# coordination/
-
-# Build artifacts
-release/
+# Binary archives (should be in releases, not repo)
 *.zip
 *.tar.gz
-robosync
 *.crate
+release/
 
-# Temporary scripts  
-scripts/
-build_*.bat
-vs-installer-*.md
-
-# Test files that should NEVER be in root
-test_*
-*_test*
-perf_*
-quick_perf_*
-np_test*
-mac_test*
+# Platform-specific
 nul
+.DS_Store
 
-# Binary archives in root
-robosync-*.zip
-robosync-*.tar.gz
+# Source files that don't belong in main (experimental/incomplete)
+src/extent_copy.rs
+src/fast_batch_copy.rs
+src/io_uring.rs
+src/macos_apfs.rs
+src/macos_benchmarks.rs
+src/macos_mmap.rs
+src/macos_network_fs.rs
+src/macos_zfs.rs
+src/network_fs.rs
+src/small_file_optimizer.rs
+src/streaming_batch.rs
+src/ultra_fast_copy.rs
 
-# Package manager files
-package-managers/
-homebrew-tap/
-temp/
+# Non-essential documentation
+ENTERPRISE.md
+ROBOSYNC_3.0_SIMPLIFIED_PROPOSAL.md
+TESTING_PLAN.md
 
-# Chat logs
-chatlog.txt
-
-# Non-essential files
-aur-package/
-coordination/
-scripts/
-snap/
-# BENCHMARKS.md - might be useful for users
-# TROUBLESHOOTING.md - might be useful for users
-# PERFORMANCE_OPTIMIZATIONS.md - might be useful for users
-build-releases.sh
-robosync.json
-robosync.nix
-ai-coordination.md
-HOMEBREW_SUBMISSION.md
-WINGET_SUBMISSION.md
-
-# AI coordination files
-*roboclaude*.md
-*TODO*.md
-*STATUS*.md
-URGENT_*.md
-coordination/
-shared.json
-*gemini*.md
-*claude*.md
-ai-suggestions*.md
-*responses*.md
-RELEASE_*.md
-*_RELEASE*.md
-
-# Benchmarks and examples - KEEP THESE, they're part of the crate!
-# benches/
-# examples/
-# docs/
-
-# Package manager configs (keep local)
-*.nuspec
-roethlar.robosync*.yaml
-tools/
-winget-pkgs/
+# Keep these essential files:
+# /src/ (main source code)
+# /tests/ (rust test files)
+# /benches/ (rust benchmarks) 
+# /examples/ (rust examples)
+# Cargo.toml
+# Cargo.lock
+# LICENSE
+# README.md
+# CHANGELOG.md
+# CLAUDE.md (critical rules)
+# .github/ (CI/CD)
