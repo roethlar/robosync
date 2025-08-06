@@ -246,8 +246,6 @@ fn build_cli() -> Command {
         // Retry options
         .arg(
             Arg::new("retry-count")
-                .short('r')
-                .short_alias('R')
                 .long("retry")
                 .value_name("NUM")
                 .help("Number of retries on failed copies (default: 0)")
@@ -306,10 +304,18 @@ fn build_cli() -> Command {
                 .help("Size threshold for large files in bytes (default: 104857600 / 100MB). Files above this use memory-mapped I/O and parallel chunks.")
                 .value_parser(clap::value_parser!(u64))
         )
+        .arg(
+            Arg::new("batch-file-count-threshold")
+                .long("batch-count")
+                .value_name("COUNT")
+                .help("File count threshold for batching small files (default: 100). Directories with more than this many small files will use batch mode.")
+                .value_parser(clap::value_parser!(usize))
+        )
 
         // Special options
         .arg(
             Arg::new("recursive")
+                .short('r')
                 .long("recursive")
                 .help("Copy directories recursively (automatically enabled for directory sources)")
                 .action(clap::ArgAction::SetTrue)
@@ -334,6 +340,12 @@ fn build_cli() -> Command {
                 .short_alias('N')
                 .long("dry-run")
                 .help("Perform a trial run with no changes made")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("no-batch")
+                .long("no-batch")
+                .help("Disable tar batching for small files")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
@@ -445,6 +457,7 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
     let show_progress = matches.get_flag("progress");
     let no_report_errors = matches.get_flag("no-report-errors");
+    let no_batch = matches.get_flag("no-batch");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
     let debug = matches.get_flag("debug");
@@ -523,6 +536,7 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     let small_file_threshold = matches.get_one::<u64>("small-file-threshold").copied();
     let medium_file_threshold = matches.get_one::<u64>("medium-file-threshold").copied();
     let large_file_threshold = matches.get_one::<u64>("large-file-threshold").copied();
+    let batch_file_count_threshold = matches.get_one::<usize>("batch-file-count-threshold").copied();
 
     // Copy flags
     let copy_flags = matches
@@ -602,9 +616,11 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
         enterprise_mode,
         verify_integrity,
         atomic_operations,
+        no_batch,
         small_file_threshold,
         medium_file_threshold,
         large_file_threshold,
+        batch_file_count_threshold,
         buffer_memory_fraction: None,
     };
 
@@ -726,7 +742,7 @@ fn execute_sync(source: PathBuf, destination: PathBuf, sync_options: SyncOptions
                 max_parallel_files: threads * 2,
             };
 
-            let syncer = ParallelSyncer::new(config);
+            let mut syncer = ParallelSyncer::new(config);
             if let Some(ref strategy) = sync_options.forced_strategy {
                 println!("Diagnostic mode: using {strategy} strategy");
             }
@@ -749,7 +765,7 @@ fn execute_sync(source: PathBuf, destination: PathBuf, sync_options: SyncOptions
                 max_parallel_files: threads * 2,
             };
 
-            let syncer = ParallelSyncer::new(config);
+            let mut syncer = ParallelSyncer::new(config);
             let stats = syncer.synchronize_smart(source, destination, mixed_options)?;
 
             // Print summary statistics when not using progress bar

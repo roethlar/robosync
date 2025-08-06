@@ -102,18 +102,39 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
     stats: Option<&SyncStats>,
     error_reporter: Option<&ErrorReportHandle>,
 ) -> Result<u64> {
+    // Handle destination directory case - if destination is a directory or ends with separator,
+    // append the source filename to it
+    let actual_destination = if destination.is_dir() || 
+        destination.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) ||
+        destination.to_string_lossy().ends_with('/') {
+        // If destination is a directory or has trailing slash, append filename
+        let file_name = source.file_name()
+            .ok_or_else(|| anyhow::anyhow!("Source file has no name: {}", source.display()))?;
+        
+        // If destination exists and is a directory, join the filename
+        if destination.is_dir() {
+            destination.join(file_name)
+        } else {
+            // Destination doesn't exist but has trailing slash - create directory and add filename
+            std::fs::create_dir_all(destination)?;
+            destination.join(file_name)
+        }
+    } else {
+        destination.to_path_buf()
+    };
+    
     // Check if source is a symlink first
     let source_metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("Failed to read source metadata: {}", source.display()))?;
 
     if source_metadata.is_symlink() {
-        return copy_symlink_with_metadata(source, destination, flags);
+        return copy_symlink_with_metadata(source, &actual_destination, flags);
     }
 
     // First, let's copy the file data - this is the critical part
     let bytes_copied = if flags.data {
         // Try reflink first if enabled
-        match try_reflink(source, destination, reflink_options) {
+        match try_reflink(source, &actual_destination, reflink_options) {
             ReflinkResult::Success => {
                 // Reflink succeeded - update stats if provided
                 if let Some(stats) = stats {
@@ -127,7 +148,7 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
                 if let Some(stats) = stats {
                     stats.add_reflink_fallback();
                 }
-                streaming_copy_optimized(source, destination)?
+                streaming_copy_optimized(source, &actual_destination)?
             }
             ReflinkResult::Error(e) => {
                 // Hard error - convert to io::Error and fail
@@ -150,39 +171,39 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
 
     // Apply each type of metadata, but don't fail the whole operation for non-critical errors
     if flags.timestamps {
-        if let Err(e) = copy_timestamps(source, destination, &metadata) {
+        if let Err(e) = copy_timestamps(source, &actual_destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
                 let msg = format!("Failed to preserve timestamps: {e}");
                 if let Some(reporter) = error_reporter {
-                    reporter.add_warning(destination, &msg);
+                    reporter.add_warning(&actual_destination, &msg);
                 }
             }
         }
     }
 
     if flags.security {
-        if let Err(e) = copy_permissions(source, destination, &metadata) {
+        if let Err(e) = copy_permissions(source, &actual_destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
                 let msg = format!("Failed to preserve permissions: {e}");
                 if let Some(reporter) = error_reporter {
-                    reporter.add_warning(destination, &msg);
+                    reporter.add_warning(&actual_destination, &msg);
                 }
             }
         }
     }
 
     if flags.attributes {
-        if let Err(e) = copy_attributes(source, destination, &metadata) {
+        if let Err(e) = copy_attributes(source, &actual_destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
                 let msg = format!("Failed to preserve attributes: {e}");
                 if let Some(reporter) = error_reporter {
-                    reporter.add_warning(destination, &msg);
+                    reporter.add_warning(&actual_destination, &msg);
                 }
             }
         }
@@ -190,14 +211,14 @@ pub fn copy_file_with_metadata_reflink_and_reporter(
 
     #[cfg(unix)]
     if flags.owner {
-        if let Err(e) = copy_ownership(source, destination, &metadata) {
+        if let Err(e) = copy_ownership(source, &actual_destination, &metadata) {
             if error_reporter.is_none() {
                 METADATA_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
             } else {
                 let msg =
                     format!("Failed to preserve ownership: {e} (requires appropriate privileges)");
                 if let Some(reporter) = error_reporter {
-                    reporter.add_warning(destination, &msg);
+                    reporter.add_warning(&actual_destination, &msg);
                 }
             }
         }
@@ -736,18 +757,60 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
         }
     }
 
+    // For Linux with ext4/XFS, try extent-based copy to preserve sparse files
+    #[cfg(target_os = "linux")]
+    {
+        use crate::extent_copy::ExtentCopier;
+        use crate::filesystem_info::{get_filesystem_info, FilesystemType};
+        
+        // Check if source is on a filesystem that supports extents
+        if let Ok(fs_info) = get_filesystem_info(source) {
+            match fs_info.filesystem_type {
+                FilesystemType::Ext4 | FilesystemType::Xfs => {
+                    // Use extent-based copy for sparse file preservation
+                    let copier = ExtentCopier::new(1024 * 1024); // 1MB buffer
+                    match copier.copy_file_with_extents(source, destination) {
+                        Ok(bytes) => return Ok(bytes),
+                        Err(_) => {
+                            // Fall back to regular copy if extent copy fails
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Use unbuffered I/O for better performance on large files
     use std::fs::File;
     use std::io::{Read, Write};
     use crate::buffer_sizing::BufferSizer;
+    use crate::network_fs::NetworkFsDetector;
     use crate::options::SyncOptions;
 
     let options = SyncOptions::default(); // This will be replaced with actual options later
     let buffer_sizer = BufferSizer::new(&options);
-    let buffer_size = buffer_sizer.calculate_buffer_size(std::fs::metadata(source)?.len());
-
+    
+    // Detect network filesystem types for optimization
+    let mut fs_detector = NetworkFsDetector::new();
+    let src_fs_info = fs_detector.detect_filesystem(source);
+    let dst_fs_info = fs_detector.detect_filesystem(destination);
+    
     let source_file_metadata = std::fs::metadata(source)?;
-    let buffer_size = buffer_sizer.calculate_buffer_size(source_file_metadata.len());
+    
+    // Use network filesystem-aware buffer sizing
+    let buffer_size = if src_fs_info.fs_type != crate::network_fs::NetworkFsType::Local 
+        || dst_fs_info.fs_type != crate::network_fs::NetworkFsType::Local {
+        // Choose the more restrictive filesystem for buffer sizing
+        let fs_info = if src_fs_info.optimal_buffer_size < dst_fs_info.optimal_buffer_size {
+            &src_fs_info
+        } else {
+            &dst_fs_info
+        };
+        buffer_sizer.calculate_buffer_size_with_fs(source_file_metadata.len(), Some(fs_info))
+    } else {
+        buffer_sizer.calculate_buffer_size(source_file_metadata.len())
+    };
 
     let mut source_file = File::open(source)
         .with_context(|| format!("Failed to open source file: {}", source.display()))?;
@@ -758,11 +821,6 @@ fn streaming_copy_optimized(source: &Path, destination: &Path) -> Result<u64> {
             destination.display()
         )
     })?;
-
-    // Pre-allocate destination file for better performance
-    if let Ok(metadata) = source_file.metadata() {
-        let _ = dest_file.set_len(metadata.len());
-    }
 
     // Direct I/O without buffering for maximum throughput
     let mut buffer = vec![0u8; buffer_size];
