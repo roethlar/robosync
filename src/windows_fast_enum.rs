@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::mem;
 #[cfg(windows)]
-use winapi::um::fileapi::{FindFirstFileExW, FindNextFileW, FindClose, FIND_FIRST_EX_LARGE_FETCH};
+use winapi::um::fileapi::{FindFirstFileExW, FindNextFileW, FindClose};
 #[cfg(windows)]
 use winapi::um::minwinbase::{FINDEX_INFO_LEVELS, FindExInfoBasic, FINDEX_SEARCH_OPS, FindExSearchNameMatch};
 #[cfg(windows)]
@@ -25,6 +25,10 @@ use winapi::um::winnt::FILE_ATTRIBUTE_DIRECTORY;
 use winapi::shared::winerror::ERROR_NO_MORE_FILES;
 #[cfg(windows)]
 use anyhow::{Result, Context};
+
+// Define FIND_FIRST_EX_LARGE_FETCH if not available in winapi
+#[cfg(windows)]
+const FIND_FIRST_EX_LARGE_FETCH: u32 = 0x00000002;
 
 /// Windows-optimized directory entry collector
 #[cfg(windows)]

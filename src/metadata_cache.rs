@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -95,7 +93,7 @@ impl InnerCache {
 
     fn get_stats(&self) -> CacheStats {
         let mut total_memory_bytes = 0;
-        for (path, entry) in &self.cache {
+        for (path, _entry) in &self.cache {
             total_memory_bytes += path.as_os_str().len(); // Estimate path memory
             // Add a rough estimate for metadata size (e.g., 100 bytes per entry)
             total_memory_bytes += 100;

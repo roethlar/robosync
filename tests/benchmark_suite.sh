@@ -224,10 +224,16 @@ run_comparison() {
     
     # Calculate speedup
     local speedup=$(echo "scale=2; $native_time / $robosync_time" | bc)
-    echo -e "\n${GREEN}Speedup: ${speedup}x${NC} (RoboSync vs $NATIVE_TOOL)"
     
-    # Add to summary
-    echo "$test_name: RoboSync ${speedup}x faster than $NATIVE_TOOL" >> "$RESULTS_SUMMARY"
+    # Check if RoboSync is faster or slower
+    if (( $(echo "$speedup > 1" | bc -l) )); then
+        echo -e "\n${GREEN}Speedup: ${speedup}x${NC} (RoboSync is faster than $NATIVE_TOOL)"
+        echo "$test_name: RoboSync ${speedup}x faster than $NATIVE_TOOL" >> "$RESULTS_SUMMARY"
+    else
+        local slowdown=$(echo "scale=2; $robosync_time / $native_time" | bc)
+        echo -e "\n${RED}Slowdown: ${slowdown}x${NC} (RoboSync is slower than $NATIVE_TOOL)"
+        echo "$test_name: RoboSync ${slowdown}x slower than $NATIVE_TOOL" >> "$RESULTS_SUMMARY"
+    fi
 }
 
 # Main benchmark execution

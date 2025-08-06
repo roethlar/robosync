@@ -9,7 +9,7 @@
 use anyhow::Result;
 use rayon::prelude::*;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::error::RoboSyncError;
@@ -21,7 +21,6 @@ use crate::operation_utils::{
     prepare_destination_path, update_progress, update_progress_with_file,
 };
 use crate::options::SyncOptions;
-use crate::platform_api::PlatformCopier;
 use crate::progress::SyncProgress;
 use crate::sync_stats::SyncStats;
 
@@ -430,7 +429,7 @@ impl MixedStrategyExecutor {
                 thread::spawn(move || {
                     let mut last_position = 0u64;
                     let mut stall_count = 0;
-                    let mut last_rate = 0.0;
+                    let mut _last_rate = 0.0;
                     let spinner_chars = vec!['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                     let mut spinner_idx = 0;
 
@@ -460,7 +459,7 @@ impl MixedStrategyExecutor {
                             stall_count += 1;
                         } else {
                             stall_count = 0;
-                            last_rate = rate;
+                            _last_rate = rate;
                         }
 
                         // Update spinner
@@ -773,7 +772,60 @@ impl MixedStrategyExecutor {
         let mut stats = SyncStats::default();
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
 
-        // Configure thread pool for optimal performance
+        // On Linux, use optimized batch copy for small files
+        #[cfg(target_os = "linux")]
+        {
+            // Prepare file pairs for batch operation
+            let mut file_pairs = Vec::with_capacity(files.len());
+            for op in files {
+                match op {
+                    FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                        let dest = match prepare_destination_path(path, source_root, dest_root) {
+                            Ok(dest) => dest,
+                            Err(e) => {
+                                stats.increment_errors();
+                                if let Some(logger) = &self.logger {
+                                    let logger_guard = logger.lock().unwrap();
+                                    logger_guard.log(&format!("Error preparing path {}: {}", path.display(), e));
+                                }
+                                continue;
+                            }
+                        };
+                        file_pairs.push((path.clone(), dest));
+                    }
+                    _ => continue,
+                }
+            }
+
+            if !file_pairs.is_empty() {
+                // Use Linux batch copy
+                // Using Linux batch copy for optimal performance
+                match crate::fast_batch_copy::hybrid_batch_copy(file_pairs) {
+                    Ok(batch_stats) => {
+                        // Update stats using proper methods
+                        for _ in 0..batch_stats.files_copied {
+                            stats.increment_files_copied();
+                        }
+                        stats.add_bytes_transferred(batch_stats.bytes_copied);
+                        
+                        if let Some(pb) = progress_bar {
+                            pb.inc(batch_stats.files_copied);
+                            update_progress(&self.progress, Some(pb), stats.bytes_transferred(), start_time);
+                        }
+                        return Ok(stats);
+                    }
+                    Err(e) => {
+                        if let Some(logger) = &self.logger {
+                            let logger_guard = logger.lock().unwrap();
+                            logger_guard.log(&format!("Batch copy failed, falling back to individual copies: {}", e));
+                        }
+                        // Fall through to regular processing
+                    }
+                }
+            }
+        }
+
+        // Configure thread pool for optimal performance (fallback for non-Linux or if batch fails)
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(SMALL_FILE_THREADS)
             .build()
@@ -1056,51 +1108,122 @@ impl MixedStrategyExecutor {
         Ok(stats)
     }
 
-    /// Process medium files using platform APIs
+    /// Process medium files using reflink-aware copying
     fn process_medium_files(
         &self,
         files: &[FileOperation],
         source_root: &Path,
         dest_root: &Path,
-        _options: &SyncOptions,
+        options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
-        _start_time: std::time::Instant,
+        start_time: std::time::Instant,
     ) -> Result<SyncStats> {
-        let copier = PlatformCopier::new();
+        use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+        use crate::reflink::ReflinkOptions;
 
-        // Convert operations to file pairs
-        let file_pairs: Vec<(PathBuf, PathBuf)> = files
-            .iter()
-            .filter_map(|op| match op {
+        let stats = SyncStats::default();
+        let copy_flags = CopyFlags::from_string(&options.copy_flags);
+
+        // Process medium files with reflink optimization
+        for op in files {
+            match op {
                 FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                    // Use utility function for path resolution
-                    let dest = crate::operation_utils::resolve_destination_path(
-                        path,
-                        source_root,
-                        dest_root,
-                    );
-                    Some((path.clone(), dest))
+                    // Use utility function for path resolution and parent directory creation
+                    let dest = match prepare_destination_path(path, source_root, dest_root) {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            let robosync_err = RoboSyncError::operation_failed(
+                                "prepare_path",
+                                e.to_string(),
+                            );
+                            stats.add_structured_error(robosync_err, "prepare_destination");
+                            continue;
+                        }
+                    };
+
+                    // Copy the file with reflink optimization
+                    let reflink_options = ReflinkOptions {
+                        mode: options.reflink,
+                    };
+                    match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, Some(&stats)) {
+                        Ok(bytes) => {
+                            stats.add_bytes_transferred(bytes);
+                            stats.increment_files_copied();
+
+                            // Use utility function for progress tracking with file info
+                            update_progress_with_file(
+                                &self.progress,
+                                progress_bar,
+                                bytes,
+                                start_time,
+                                path,
+                            );
+
+                            // Show on console only with -vv mode
+                            if options.verbose >= 2 {
+                                eprintln!(
+                                    "  ✓ Copied (medium): {} → {} ({} bytes)",
+                                    path.display(),
+                                    dest.display(),
+                                    bytes
+                                );
+                            }
+
+                            // Log to file with -v or higher
+                            if options.verbose >= 1 {
+                                if let Some(ref logger) = self.logger {
+                                    if let Ok(logger) = logger.lock() {
+                                        logger.log_file_operation(
+                                            "Copied (medium)",
+                                            &format!(
+                                                "{} → {} ({} bytes)",
+                                                path.display(),
+                                                dest.display(),
+                                                bytes
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let error_str = e.to_string();
+
+                            // Log error to file
+                            if let Some(ref logger) = self.logger {
+                                if let Ok(logger) = logger.lock() {
+                                    logger.log_error(&format!(
+                                        "Failed to copy (medium) {} → {}: {}",
+                                        path.display(),
+                                        dest.display(),
+                                        error_str
+                                    ));
+                                }
+                            }
+
+                            // Convert anyhow::Error to RoboSyncError
+                            let robosync_err = match e.downcast::<std::io::Error>() {
+                                Ok(io_err) => {
+                                    RoboSyncError::io_error(io_err, Some(path.clone()))
+                                }
+                                Err(e) => RoboSyncError::sync_failed(
+                                    e.to_string(),
+                                    Some(path.clone()),
+                                    Some(dest.clone()),
+                                ),
+                            };
+                            stats.add_structured_error(robosync_err, "copy_file");
+
+                            // Still increment progress bar even for failed files
+                            if let Some(pb) = progress_bar {
+                                pb.inc(1);
+                            }
+                        }
+                    }
                 }
-                _ => None,
-            })
-            .collect();
-
-        // Copy files and update progress
-        let stats = copier.copy_files(&file_pairs)?;
-
-        // Update progress for all files attempted (not just successful copies)
-        let total_files = file_pairs.len() as u64;
-        for _ in 0..total_files {
-            if let Some(pb) = progress_bar {
-                pb.inc(1);
+                _ => {}
             }
         }
-
-        // Update internal progress tracking
-        for _ in 0..stats.files_copied() {
-            self.progress.add_file();
-        }
-        self.progress.add_bytes(stats.bytes_transferred());
 
         Ok(stats)
     }
@@ -1115,6 +1238,9 @@ impl MixedStrategyExecutor {
         progress_bar: Option<&indicatif::ProgressBar>,
         start_time: std::time::Instant,
     ) -> Result<SyncStats> {
+        use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+        use crate::reflink::ReflinkOptions;
+        
         let stats = SyncStats::default();
 
         for op in files {
@@ -1187,17 +1313,25 @@ impl MixedStrategyExecutor {
                     }
                 }
                 FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                    // Use platform API for new large files or updates without checksum
-                    let relative = path.strip_prefix(source_root).unwrap_or(path);
-                    let dest = dest_root.join(relative);
+                    // Use reflink-aware copying for new large files or updates without checksum
+                    let dest = match prepare_destination_path(path, source_root, dest_root) {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            let robosync_err = RoboSyncError::operation_failed(
+                                "prepare_path",
+                                e.to_string(),
+                            );
+                            stats.add_structured_error(robosync_err, "prepare_destination");
+                            continue;
+                        }
+                    };
 
-                    // Ensure parent directory exists
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    let copier = PlatformCopier::new();
-                    match copier.copy_file(path, &dest) {
+                    // Use reflink-aware copying instead of platform API
+                    let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                    let reflink_options = ReflinkOptions {
+                        mode: options.reflink,
+                    };
+                    match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, Some(&stats)) {
                         Ok(bytes) => {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
@@ -1208,7 +1342,7 @@ impl MixedStrategyExecutor {
                             // Show on console only with -vv mode
                             if options.verbose >= 2 {
                                 eprintln!(
-                                    "  ✓ Copied: {} → {} ({} bytes)",
+                                    "  ✓ Copied (large): {} → {} ({} bytes)",
                                     path.display(),
                                     dest.display(),
                                     bytes
@@ -1220,7 +1354,7 @@ impl MixedStrategyExecutor {
                                 if let Some(ref logger) = self.logger {
                                     if let Ok(logger) = logger.lock() {
                                         logger.log_file_operation(
-                                            "Copied",
+                                            "Copied (large)",
                                             &format!(
                                                 "{} → {} ({} bytes)",
                                                 path.display(),
@@ -1283,22 +1417,48 @@ impl MixedStrategyExecutor {
         progress_bar: Option<&indicatif::ProgressBar>,
         start_time: std::time::Instant,
     ) -> Result<SyncStats> {
+        use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
+        use crate::reflink::ReflinkOptions;
+        
         let stats = SyncStats::default();
 
         for op in files {
             match op {
                 FileOperation::Create { path } => {
-                    // New files can't use delta, use platform copy
-                    let relative = path.strip_prefix(source_root).unwrap_or(path);
-                    let dest = dest_root.join(relative);
+                    // New files can't use delta, use memory-mapped IO or reflink-aware copy
+                    let dest = match prepare_destination_path(path, source_root, dest_root) {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            let robosync_err = RoboSyncError::operation_failed(
+                                "prepare_path",
+                                e.to_string(),
+                            );
+                            stats.add_structured_error(robosync_err, "prepare_destination");
+                            continue;
+                        }
+                    };
 
-                    // Ensure parent directory exists
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    let copier = PlatformCopier::new();
-                    match copier.copy_file(path, &dest) {
+                    // Try memory-mapped IO for very large files on macOS first
+                    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    let copy_result = if self.should_use_memory_mapping(file_size) {
+                        self.try_memory_mapped_copy(path, &dest, options)
+                    } else {
+                        None
+                    };
+                    
+                    // Fall back to reflink-aware copying if mmap not used or failed
+                    let final_result = match copy_result {
+                        Some(Ok(bytes)) => Ok(bytes),
+                        Some(Err(_)) | None => {
+                            let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                            let reflink_options = ReflinkOptions {
+                                mode: options.reflink,
+                            };
+                            copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, Some(&stats))
+                        }
+                    };
+                    
+                    match final_result {
                         Ok(bytes) => {
                             stats.add_bytes_transferred(bytes);
                             stats.increment_files_copied();
@@ -2026,5 +2186,78 @@ impl MixedStrategyExecutor {
         stats.basic.files_delete = categorized.deletes.len() as u64;
 
         stats
+    }
+    
+    /// Check if memory-mapped IO should be used for a file
+    fn should_use_memory_mapping(&self, file_size: u64) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            // Use memory mapping for files >= 256MB on macOS
+            const MMAP_THRESHOLD_LARGE: u64 = 256 * 1024 * 1024;
+            file_size >= MMAP_THRESHOLD_LARGE
+        }
+        
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = file_size; // Suppress unused warning
+            false
+        }
+    }
+    
+    /// Attempt memory-mapped copy for very large files on macOS
+    fn try_memory_mapped_copy(
+        &self,
+        source: &Path,
+        dest: &Path,
+        options: &SyncOptions,
+    ) -> Option<Result<u64, anyhow::Error>> {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::macos_mmap::MacOSMemoryMapper;
+            
+            // Only use memory mapping if enabled in options or for very large files
+            let file_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+            
+            match MacOSMemoryMapper::new() {
+                Ok(mapper) => {
+                    if mapper.should_use_mmap(file_size) {
+                        // Log memory mapping attempt if verbose
+                        if options.verbose >= 2 {
+                            eprintln!(
+                                "  🗺️ Using memory-mapped IO: {} ({} bytes)",
+                                source.display(),
+                                file_size
+                            );
+                        }
+                        
+                        // Log to file with -v or higher
+                        if options.verbose >= 1 {
+                            if let Some(ref logger) = self.logger {
+                                if let Ok(logger) = logger.lock() {
+                                    logger.log_file_operation(
+                                        "Memory-mapped copy starting",
+                                        &format!("{} → {} ({} bytes)", 
+                                                source.display(), 
+                                                dest.display(), 
+                                                file_size),
+                                    );
+                                }
+                            }
+                        }
+                        
+                        Some(mapper.copy_file_mmap(source, dest))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (source, dest, options); // Suppress unused warnings
+            None
+        }
     }
 }

@@ -45,10 +45,14 @@ thiserror = "1.0"
 blake3 = "1.0"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 md-5 = "0.10"
+sha2 = "0.10"
 
 # Compression
 zstd = "0.13"
 lz4_flex = "0.11"
+
+# Archiving for batch mode
+tar = "0.4"
 
 # File system operations
 walkdir = "2.0"
@@ -95,7 +99,7 @@ libc = "0.2"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi", "winbase", "winnt", "winerror", "errhandlingapi"] }
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi", "winbase", "winnt", "winerror", "errhandlingapi", "ioapiset", "winioctl", "wow64apiset"] }
 
 [dev-dependencies]
 tempfile = "3.0"
@@ -114,6 +118,3 @@ strip = true
 [profile.dev]
 opt-level = 1
 
-[[bench]]
-name = "performance"
-harness = false

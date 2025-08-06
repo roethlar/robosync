@@ -44,6 +44,7 @@ pub struct Config {
     pub small_file_threshold: Option<u64>,
     pub medium_file_threshold: Option<u64>,
     pub large_file_threshold: Option<u64>,
+    pub batch_file_count_threshold: Option<usize>,
     pub buffer_memory_fraction: Option<f64>,
 }
 
@@ -101,12 +102,17 @@ pub struct SyncOptions {
     pub symlink_behavior: SymlinkBehavior,
     pub no_report_errors: bool,
     pub debug: bool,
+    pub enterprise_mode: bool,
+    pub verify_integrity: bool,
+    pub atomic_operations: bool,
+    pub no_batch: bool,
     // shimmer_model_path removed - AI features moved to separate project
 
     // Configurable file size thresholds
     pub small_file_threshold: Option<u64>,
     pub medium_file_threshold: Option<u64>,
     pub large_file_threshold: Option<u64>,
+    pub batch_file_count_threshold: Option<usize>,
     pub buffer_memory_fraction: Option<f64>,
 }
 
@@ -140,9 +146,14 @@ impl Default for SyncOptions {
             symlink_behavior: SymlinkBehavior::Preserve,
             no_report_errors: false,
             debug: false,
+            enterprise_mode: false,
+            verify_integrity: false,
+            atomic_operations: false,
+            no_batch: false,
             small_file_threshold: None,
             medium_file_threshold: None,
             large_file_threshold: None,
+            batch_file_count_threshold: None,
             buffer_memory_fraction: None,
         }
     }

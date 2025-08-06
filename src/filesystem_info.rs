@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use crate::safe_ops::SafeMutex;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 use nix::sys::statfs;
@@ -92,10 +93,31 @@ fn get_filesystem_info_unix(path: &Path) -> Result<FilesystemInfo, io::Error> {
         }
     };
     
+    // On Linux, only BTRFS and XFS support FICLONE ioctl
+    // ZFS on Linux doesn't support FICLONE (it has its own copy-on-write mechanism)
+    #[cfg(target_os = "linux")]
     let supports_reflinks = matches!(
         fs_type, 
-        FilesystemType::Btrfs | FilesystemType::Xfs | FilesystemType::Apfs | FilesystemType::Zfs
+        FilesystemType::Btrfs | FilesystemType::Xfs
     );
+    
+    // On macOS, APFS supports clonefile()
+    #[cfg(target_os = "macos")]
+    let supports_reflinks = matches!(
+        fs_type, 
+        FilesystemType::Apfs
+    );
+    
+    // On FreeBSD, ZFS supports copy-on-write
+    #[cfg(target_os = "freebsd")]
+    let supports_reflinks = matches!(
+        fs_type, 
+        FilesystemType::Zfs
+    );
+    
+    // On other platforms, no reflink support
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+    let supports_reflinks = false;
 
     Ok(FilesystemInfo {
         device_id: metadata.dev(),
@@ -167,7 +189,8 @@ fn get_filesystem_info_windows(path: &Path) -> Result<FilesystemInfo, io::Error>
 }
 
 pub fn get_filesystem_info(path: &Path) -> Result<FilesystemInfo, io::Error> {
-    let mut cache = FILESYSTEM_INFO_CACHE.lock().unwrap();
+    let mut cache = FILESYSTEM_INFO_CACHE.safe_lock()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to lock filesystem cache: {}", e)))?;
     if let Some((info, timestamp)) = cache.get(path) {
         if timestamp.elapsed() < CACHE_TTL {
             return Ok(info.clone());

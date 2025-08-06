@@ -39,6 +39,10 @@ pub mod reflink;
 pub mod buffer_sizing;
 pub mod parallel_dirs;
 pub mod metadata_cache;
+pub mod integrity;
+pub mod safe_ops;
+pub mod mission_critical;
+pub mod streaming_batch;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]
@@ -47,11 +51,39 @@ pub mod linux_fast_copy;
 #[cfg(target_os = "linux")]
 pub mod linux_parallel_sync;
 
+#[cfg(target_os = "linux")]
+pub mod fast_batch_copy;
+pub mod small_file_optimizer;
+pub mod ultra_fast_copy;
+
+#[cfg(target_os = "linux")]
+pub mod io_uring;
+
+#[cfg(target_os = "linux")]
+pub mod extent_copy;
+
+pub mod network_fs;
+
 #[cfg(target_os = "windows")]
 pub mod windows_symlinks;
 
 #[cfg(target_os = "windows")]
 pub mod windows_fast_enum;
+
+#[cfg(target_os = "macos")]
+pub mod macos_mmap;
+
+#[cfg(target_os = "macos")]
+pub mod macos_zfs;
+
+#[cfg(target_os = "macos")]
+pub mod macos_apfs;
+
+#[cfg(target_os = "macos")]
+pub mod macos_network_fs;
+
+#[cfg(target_os = "macos")]
+pub mod macos_benchmarks;
 
 pub use algorithm::DeltaAlgorithm;
 pub use checksum::ChecksumType;
