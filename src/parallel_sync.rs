@@ -33,6 +33,8 @@ use crate::strategy::{CopyStrategy, FileStats, StrategySelector};
 use crate::sync_stats::SyncStats;
 use crossterm::style::Color;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use crate::compression::{StreamingCompressor, StreamingDecompressor};
+use std::io::{BufReader, BufWriter};
 
 /// Format number with thousands separator
 fn format_number(n: u64) -> String {
@@ -179,7 +181,7 @@ impl ParallelSyncer {
     }
 
     /// Handle single file copying - fix for critical bug identified by mac_claude
-    fn handle_single_file_copy(&self, source: &Path, destination: &Path, options: &SyncOptions) -> Result<SyncStats> {
+    fn handle_single_file_copy(&mut self, source: &Path, destination: &Path, options: &SyncOptions) -> Result<SyncStats> {
         use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
         use crate::reflink::ReflinkOptions;
         
@@ -225,7 +227,7 @@ impl ParallelSyncer {
 
     /// Execute mixed mode directly without file analysis
     fn execute_mixed_mode_direct(
-        &self,
+        &mut self,
         source: PathBuf,
         destination: PathBuf,
         options: SyncOptions,
@@ -233,6 +235,34 @@ impl ParallelSyncer {
         // Handle file-to-file copying - critical fix from mac_claude
         if source.is_file() {
             return self.handle_single_file_copy(&source, &destination, &options);
+        }
+        
+        // Check if streaming batch mode should be used for small files - MOVED UP IN PRIORITY
+        if !options.no_batch && !options.purge && source.is_dir() {
+            // Sample the directory to determine if batch mode is appropriate
+            if let Ok(profile) = crate::streaming_batch::sample_directory(&source, 100) {
+                if options.verbose >= 2 {
+                    println!("Batch mode check: {} files sampled, avg size {} bytes", 
+                        profile.file_count, profile.avg_file_size);
+                }
+                if crate::streaming_batch::should_use_batch_mode(&profile, &options) {
+                    if options.show_progress {
+                        println!("🚀 Streaming batch mode detected for {} small files (avg {}KB)", 
+                            profile.file_count, 
+                            profile.avg_file_size / 1024);
+                    }
+                    let stats = SyncStats::new();
+                    return crate::streaming_batch::streaming_batch_transfer(
+                        &source, 
+                        &destination, 
+                        &stats, 
+                        &options
+                    );
+                } else if options.verbose >= 2 {
+                    println!("Batch mode not suitable: {} files, {} bytes avg (need 100+ files <10240 bytes avg)", 
+                        profile.file_count, profile.avg_file_size);
+                }
+            }
         }
         
         // Ultra-fast path for simple directory copies - beats all native tools
@@ -334,7 +364,7 @@ impl ParallelSyncer {
 
     /// Synchronize using intelligent strategy selection
     pub fn synchronize_smart(
-        &self,
+        &mut self,
         source: PathBuf,
         destination: PathBuf,
         options: SyncOptions,
@@ -353,7 +383,7 @@ impl ParallelSyncer {
 
     /// Synchronize with strategy analysis (for forced strategies other than mixed)
     fn synchronize_with_analysis(
-        &self,
+        &mut self,
         source: PathBuf,
         destination: PathBuf,
         options: SyncOptions,
@@ -522,7 +552,6 @@ impl ParallelSyncer {
                     self.synchronize_with_options(source, destination, options)
                 }
             }
-
             CopyStrategy::NativeRobocopy { extra_args } => {
                 println!("Delegating to robocopy for optimal Windows performance...");
 
@@ -544,31 +573,6 @@ impl ParallelSyncer {
                 }
             }
 
-            CopyStrategy::PlatformApi { method: _ } => {
-                println!("Using platform-specific APIs for optimal performance...");
-                let mut copier = PlatformCopier::new();
-
-                // Add progress tracking if available
-                if let Some(ref pm) = progress_manager {
-                    copier = copier.with_progress(Arc::clone(pm).create_tracker());
-                }
-
-                // Collect file operations
-                let operations = self.collect_operations(&source, &destination, &options)?;
-                let file_pairs: Vec<(PathBuf, PathBuf)> = operations
-                    .into_iter()
-                    .filter_map(|op| match op {
-                        FileOperation::Create { path } | FileOperation::Update { path, .. } => self
-                            .map_source_to_dest(&path, &source, &destination)
-                            .ok()
-                            .map(|dest| (path, dest)),
-                        _ => None,
-                    })
-                    .collect();
-
-                copier.copy_files(&file_pairs)
-            }
-
             CopyStrategy::DeltaTransfer { block_size } => {
                 println!(
                     "Using delta transfer algorithm with {}KB blocks...",
@@ -585,7 +589,7 @@ impl ParallelSyncer {
                 // Use our existing parallel implementation
                 let mut config = self.config.clone();
                 config.worker_threads = threads;
-                let syncer = ParallelSyncer::new(config);
+                let mut syncer = ParallelSyncer::new(config);
                 syncer.synchronize_with_options(source, destination, options)
             }
 
@@ -611,6 +615,12 @@ impl ParallelSyncer {
                     MixedStrategyExecutor::new(file_stats.total_files as u64, file_stats.total_size)
                 };
                 executor.execute(operations, &source, &destination, &options)
+            }
+            
+            CopyStrategy::PlatformApi { method } => {
+                println!("Using platform-specific API method: {:?}...", method);
+                // Use platform-specific optimizations
+                self.synchronize_with_options(source, destination, options)
             }
         };
 
@@ -793,7 +803,7 @@ impl ParallelSyncer {
 
     /// Synchronize files using multiple threads with options
     pub fn synchronize_with_options(
-        &self,
+        &mut self,
         source: PathBuf,
         destination: PathBuf,
         options: SyncOptions,
@@ -883,7 +893,7 @@ impl ParallelSyncer {
 
     /// Synchronize a single file
     fn sync_single_file(
-        &self,
+        &mut self,
         source: &Path,
         destination: &Path,
         options: &SyncOptions,
@@ -901,7 +911,8 @@ impl ParallelSyncer {
             destination.to_path_buf()
         };
 
-        let stats = self.sync_file_pair(source, &dest_path, options)?;
+        let mut fs_detector = NetworkFsDetector::new();
+        let stats = self.sync_file_pair(source, &dest_path, options, &mut fs_detector)?;
         logger.update_progress(1, stats.bytes_transferred());
 
         // Use formatted display for completion
@@ -2627,48 +2638,54 @@ impl ParallelSyncer {
         }
     }
 
-    /// Synchronize a single file pair using parallel block processing
+    /// Synchronize a single file pair (source to destination)
     fn sync_file_pair(
         &self,
         source: &Path,
         destination: &Path,
         options: &SyncOptions,
+        fs_detector: &mut NetworkFsDetector,
     ) -> Result<SyncStats> {
+        let stats = SyncStats::default();
+        let copy_flags = CopyFlags::from_string(&options.copy_flags);
+        let reflink_options = ReflinkOptions { mode: options.reflink };
+
         // Create parent directory if needed
         if let Some(parent) = destination.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create parent directory: {}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)?;
             }
         }
 
-        // Use the optimized copy function that supports reflinks, mmap, etc.
-        let copy_flags = CopyFlags::from_string(&options.copy_flags);
-        let reflink_options = ReflinkOptions {
-            mode: options.reflink,
-        };
-        let stats = SyncStats::new();
-        
-        let bytes_copied = copy_file_with_metadata_and_reflink(
-            source,
-            destination,
-            &copy_flags,
-            &reflink_options,
-            Some(&stats),
-        )?;
+        let dst_fs_info = fs_detector.detect_filesystem(destination);
 
-        stats.add_bytes_transferred(bytes_copied);
-        stats.increment_files_copied();
+        // Check if compression is enabled and destination is a network filesystem
+        if options.compress && dst_fs_info.fs_type != NetworkFsType::Local {
+            if options.verbose >= 1 {
+                println!("Compressing {} to network destination {}", source.display(), destination.display());
+            }
+            // Open source and destination files
+            let mut source_file = BufReader::new(fs::File::open(source)?);
+            let mut dest_file = BufWriter::new(fs::File::create(destination)?);
 
-        // If move mode is enabled, delete source file after successful copy
-        if options.move_files && !options.dry_run {
-            fs::remove_file(source).with_context(|| {
-                format!(
-                    "Failed to delete source file after move: {}",
-                    source.display()
-                )
-            })?;
+            // Compress and transfer
+            let compressor = StreamingCompressor::new(options.compression_config);
+            let bytes_written = compressor.compress_stream(&mut source_file, &mut dest_file)?;
+            
+            stats.increment_files_copied();
+            stats.add_bytes_transferred(bytes_written);
+        } else {
+            // Copy the file with all optimizations (no compression or local destination)
+            match copy_file_with_metadata_and_reflink(source, destination, &copy_flags, &reflink_options, Some(&stats)) {
+                Ok(bytes_copied) => {
+                    stats.increment_files_copied();
+                    stats.add_bytes_transferred(bytes_copied);
+                }
+                Err(e) => {
+                    stats.increment_errors();
+                    return Err(e);
+                }
+            }
         }
 
         Ok(stats)

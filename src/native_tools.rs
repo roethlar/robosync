@@ -353,7 +353,7 @@ impl NativeToolExecutor {
 
         // Use our parallel sync implementation
         let config = ParallelSyncConfig::default();
-        let syncer = ParallelSyncer::new(config);
+        let mut syncer = ParallelSyncer::new(config);
 
         // Create a simple wrapper that uses our progress manager if available
         if let Some(pm) = progress_manager {
