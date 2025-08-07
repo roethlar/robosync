@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::concurrent_delta::ConcurrentDeltaAnalyzer;
 use crate::error::RoboSyncError;
 use crate::error_logger::ErrorLogger;
 use crate::file_list::FileOperation;
@@ -37,6 +38,11 @@ const SMALL_FILE_BATCH_SIZE: usize = 5000;
 
 /// Number of parallel threads for small files
 const SMALL_FILE_THREADS: usize = 32;
+
+/// Get current timestamp for logging
+fn timestamp() -> String {
+    chrono::Local::now().format("%H:%M:%S%.3f").to_string()
+}
 
 /// Format bytes into human readable string
 fn humanize_bytes(bytes: u64) -> String {
@@ -71,10 +77,20 @@ fn format_number(n: u64) -> String {
 }
 
 /// Mixed strategy executor
-#[derive(Clone)]
 pub struct MixedStrategyExecutor {
     progress: Arc<SyncProgress>,
     logger: Option<Arc<Mutex<SyncLogger>>>,
+    delta_analyzer: Arc<Mutex<ConcurrentDeltaAnalyzer>>,
+}
+
+impl Clone for MixedStrategyExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            progress: Arc::clone(&self.progress),
+            logger: self.logger.as_ref().map(Arc::clone),
+            delta_analyzer: Arc::clone(&self.delta_analyzer),
+        }
+    }
 }
 
 impl MixedStrategyExecutor {
@@ -82,6 +98,7 @@ impl MixedStrategyExecutor {
         Self {
             progress: Arc::new(SyncProgress::new_silent(total_files, total_bytes)),
             logger: None,
+            delta_analyzer: Arc::new(Mutex::new(ConcurrentDeltaAnalyzer::new())),
         }
     }
 
@@ -89,6 +106,7 @@ impl MixedStrategyExecutor {
         Self {
             progress: Arc::new(SyncProgress::new_noop()),
             logger: None,
+            delta_analyzer: Arc::new(Mutex::new(ConcurrentDeltaAnalyzer::new())),
         }
     }
 
@@ -114,6 +132,7 @@ impl MixedStrategyExecutor {
         let logger = Arc::new(Mutex::new(SyncLogger::new(
             options.log_file.as_deref(),
             options.show_eta,
+            options.verbose,
         )?));
 
         {
@@ -128,7 +147,7 @@ impl MixedStrategyExecutor {
 
         // Create error logger for automatic error reporting
         let error_logger = ErrorLogger::new(options.clone(), source_root, dest_root);
-        let _error_handle = error_logger.get_handle();
+        let error_handle = error_logger.get_handle();
 
         // Show spinner during categorization for user feedback
         let spinner = if options.show_progress {
@@ -172,9 +191,21 @@ impl MixedStrategyExecutor {
                 // Verbose mode: show detailed breakdown
                 let detailed_stats = executor_with_logger
                     .calculate_detailed_pending_stats(&categorized, source_root);
-                formatted_display::print_pending_operations_detailed(
-                    &detailed_stats,
-                    options.verbose,
+                // TODO: Convert detailed_stats to hybrid_dam::DetailedPendingStats
+                // For now, use simple display instead
+                formatted_display::print_pending_operations(
+                    detailed_stats.basic.files_create,
+                    detailed_stats.basic.files_update,
+                    detailed_stats.basic.files_delete,
+                    0, // skipped files
+                    detailed_stats.basic.dirs_create,
+                    0, // dirs_update
+                    0, // dirs_delete  
+                    0, // dirs_skip
+                    detailed_stats.basic.size_create,
+                    detailed_stats.basic.size_update,
+                    0, // size_delete
+                    0, // size_skip
                 );
             } else {
                 // Normal mode: show simple summary
@@ -256,6 +287,7 @@ impl MixedStrategyExecutor {
                     &options,
                     Some(&pb_clone),
                     st,
+                    &error_handle,
                 );
                 let _ = tx.send(("small", stats, worker_start.elapsed()));
             });
@@ -712,8 +744,10 @@ impl MixedStrategyExecutor {
                             } else if size <= large_threshold {
                                 categorized.large_files.push(op);
                             } else {
-                                // Very large files (>100MB) benefit from delta transfer
-                                categorized.delta_files.push(op);
+                                // Very large files (>100MB) - will be analyzed for delta
+                                // Put them in large_files category for now
+                                // The process_large_files function will decide based on concurrent analysis
+                                categorized.large_files.push(op);
                             }
                         }
                         Err(_) => {
@@ -765,12 +799,37 @@ impl MixedStrategyExecutor {
         options: &SyncOptions,
         progress_bar: Option<&indicatif::ProgressBar>,
         start_time: std::time::Instant,
+        error_handle: &crate::error_logger::ErrorLogHandle,
     ) -> Result<SyncStats> {
         use crate::metadata::{copy_file_with_metadata_and_reflink, CopyFlags};
         use crate::reflink::ReflinkOptions;
 
         let mut stats = SyncStats::default();
         let copy_flags = CopyFlags::from_string(&options.copy_flags);
+
+        // Check if we should use tar streaming for small files
+        // Use tar streaming if we have enough small files to benefit from batching
+        // AND the user hasn't disabled batch mode with --no-batch
+        if !options.no_batch && files.len() >= crate::streaming_batch::BATCH_MODE_FILE_COUNT_THRESHOLD {
+            
+            // Try tar streaming first
+            match self.process_with_tar_streaming(files, source_root, dest_root, options, progress_bar, start_time) {
+                Ok(tar_stats) => {
+                    return Ok(tar_stats);
+                }
+                Err(e) => {
+                    // Log the error through error reporting system
+                    error_handle.log_error(source_root, &e.to_string(), "tar_streaming");
+                    
+                    // Also log to console logger for immediate feedback
+                    if let Some(logger) = &self.logger {
+                        let logger_guard = logger.lock().unwrap();
+                        logger_guard.log(&format!("Tar streaming failed, falling back to individual copies: {}", e));
+                    }
+                    // Continue with regular processing below
+                }
+            }
+        }
 
         // On Linux, use optimized batch copy for small files
         #[cfg(target_os = "linux")]
@@ -930,7 +989,8 @@ impl MixedStrategyExecutor {
                                         // Show on console only with -vv mode
                                         if options.verbose >= 2 {
                                             eprintln!(
-                                                "  ✓ Copied: {} → {} ({} bytes)",
+                                                "[{}]   ✓ Copied: {} → {} ({} bytes)",
+                                                timestamp(),
                                                 path.display(),
                                                 dest.display(),
                                                 bytes
@@ -1108,6 +1168,152 @@ impl MixedStrategyExecutor {
         Ok(stats)
     }
 
+    /// Process small files using tar streaming for efficiency
+    fn process_with_tar_streaming(
+        &self,
+        files: &[FileOperation],
+        source_root: &Path,
+        dest_root: &Path,
+        options: &SyncOptions,
+        progress_bar: Option<&indicatif::ProgressBar>,
+        _start_time: std::time::Instant,
+    ) -> Result<SyncStats> {
+        use std::sync::mpsc;
+        use std::thread;
+        use tar::{Builder, Archive};
+        
+        // Create a channel for in-memory streaming
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(64); // 64 chunks buffer
+        
+        let mut stats = SyncStats::default();
+        let verbose = options.verbose; // Extract verbose level for thread
+        
+        // Prepare list of files to stream
+        let mut files_to_stream = Vec::new();
+        let mut total_bytes = 0u64;
+        
+        for op in files {
+            match op {
+                FileOperation::Create { path } | FileOperation::Update { path, .. } => {
+                    let relative = path.strip_prefix(source_root).unwrap_or(path);
+                    if let Ok(metadata) = path.metadata() {
+                        total_bytes += metadata.len();
+                    }
+                    files_to_stream.push((path.clone(), relative.to_path_buf()));
+                }
+                _ => {}
+            }
+        }
+        
+        if files_to_stream.is_empty() {
+            return Ok(SyncStats::default());
+        }
+
+        // Only show the tar streaming message when we actually have files to process
+        if options.verbose >= 1 {
+            eprintln!(
+                "[{}] Using in-memory tar streaming for {} files that need copying (threshold: {})",
+                timestamp(),
+                files_to_stream.len(),
+                crate::streaming_batch::BATCH_MODE_FILE_COUNT_THRESHOLD
+            );
+        }
+        
+        let files_for_packer = files_to_stream.clone();
+        let dest_root_unpacker = dest_root.to_path_buf();
+        
+        // Thread 1: Create tar stream in memory
+        let packer_handle = thread::spawn(move || -> Result<()> {
+            let mut writer = crate::streaming_batch::ChannelWriter::new(tx);
+            let mut builder = Builder::new(&mut writer);
+            
+            for (source_path, relative_path) in files_for_packer {
+                builder.append_path_with_name(&source_path, &relative_path)?;
+            }
+            
+            builder.finish()?;
+            Ok(())
+        });
+        
+        // Thread 2: Extract tar stream directly to destination
+        let unpacker_handle = thread::spawn(move || -> Result<u64> {
+            let reader = crate::streaming_batch::ChannelReader::new(rx);
+            let mut archive = Archive::new(reader);
+            let mut count = 0u64;
+            
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                let path = entry.path()?;
+                
+                // Convert Unix-style paths to Windows-style paths on Windows
+                let path_str = path.to_string_lossy();
+                let normalized_path = if cfg!(windows) {
+                    std::path::PathBuf::from(path_str.replace('/', "\\"))
+                } else {
+                    path.to_path_buf()
+                };
+                
+                let dest_path = dest_root_unpacker.join(&normalized_path);
+                
+                // Debug: Log problematic paths (only with -vv flag)
+                if path_str.contains('/') && cfg!(windows) && verbose > 1 {
+                    eprintln!("[{}] Path conversion: '{}' -> '{}'", 
+                        timestamp(), path_str, dest_path.display());
+                }
+                
+                // Create parent directories
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                
+                // Extract the file
+                entry.unpack(&dest_path)?;
+                count += 1;
+            }
+            
+            Ok(count)
+        });
+        
+        // Wait for packer to finish
+        if let Err(e) = packer_handle.join().unwrap() {
+            return Err(e);
+        }
+        
+        // Wait for unpacker to finish
+        match unpacker_handle.join().unwrap() {
+            Ok(files_extracted) => {
+                stats.add_bytes_transferred(total_bytes);
+                for _ in 0..files_extracted {
+                    stats.increment_files_copied();
+                }
+                
+                if let Some(pb) = progress_bar {
+                    pb.inc(files_extracted);
+                    pb.set_message(format!("Tar streamed {} files ({} bytes)", files_extracted, total_bytes));
+                }
+                
+                if options.verbose >= 1 {
+                    eprintln!(
+                        "[{}] Tar streaming completed: {} files ({} bytes) transferred",
+                        timestamp(),
+                        files_extracted, 
+                        total_bytes
+                    );
+                    if let Some(logger) = &self.logger {
+                        let logger_guard = logger.lock().unwrap();
+                        logger_guard.log(&format!(
+                            "Tar streaming completed: {} files ({} bytes) transferred",
+                            files_extracted, total_bytes
+                        ));
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        
+        Ok(stats)
+    }
+
     /// Process medium files using reflink-aware copying
     fn process_medium_files(
         &self,
@@ -1162,7 +1368,8 @@ impl MixedStrategyExecutor {
                             // Show on console only with -vv mode
                             if options.verbose >= 2 {
                                 eprintln!(
-                                    "  ✓ Copied (medium): {} → {} ({} bytes)",
+                                    "[{}]   ✓ Copied (medium): {} → {} ({} bytes)",
+                                    timestamp(),
                                     path.display(),
                                     dest.display(),
                                     bytes
@@ -1243,77 +1450,201 @@ impl MixedStrategyExecutor {
         
         let stats = SyncStats::default();
 
+        // Start concurrent delta analysis for Update operations automatically
+        // This runs in background threads so it doesn't block other operations
+        {
+            let mut analyzer = self.delta_analyzer.lock().unwrap();
+            for op in files {
+                if let FileOperation::Update { path, .. } = op {
+                    let dest = crate::operation_utils::resolve_destination_path(
+                        path,
+                        source_root,
+                        dest_root,
+                    );
+                    
+                    // Only analyze if destination exists and file is large
+                    if dest.exists() {
+                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        if size > DEFAULT_LARGE_FILE_THRESHOLD {
+                            // Start background analysis
+                            analyzer.analyze_file(path.to_path_buf(), dest.clone());
+                            
+                            if options.verbose >= 2 {
+                                eprintln!("[{}]   🔍 Started concurrent delta analysis for: {}", timestamp(), path.display());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for op in files {
             match op {
-                FileOperation::Update { path, .. } if options.checksum => {
-                    // Use delta transfer for large file updates
+                FileOperation::Update { path, .. } => {
+                    // Smart decision for large file updates - check concurrent delta analysis
                     let dest = crate::operation_utils::resolve_destination_path(
                         path,
                         source_root,
                         dest_root,
                     );
 
-                    match self.delta_copy_file(path, &dest, options) {
-                        Ok(bytes) => {
-                            stats.add_bytes_transferred(bytes);
-                            stats.increment_files_copied();
-
-                            // Show on console only with -vv mode
-                            if options.verbose >= 2 {
-                                eprintln!(
-                                    "  ✓ Delta transfer complete: {} → {} ({} transferred)",
-                                    path.display(),
-                                    dest.display(),
-                                    humanize_bytes(bytes)
-                                );
-                            }
-
-                            // Log to file with -v or higher
-                            if options.verbose >= 1 {
-                                if let Some(ref logger) = self.logger {
-                                    if let Ok(logger) = logger.lock() {
-                                        logger.log_file_operation(
-                                            "Delta transfer complete",
-                                            &format!(
-                                                "{} → {} ({} bytes)",
-                                                path.display(),
-                                                dest.display(),
-                                                bytes
-                                            ),
-                                        );
-                                    }
+                    // STARTUP OPTIMIZATION: Skip expensive checksum generation if destination doesn't exist
+                    if !dest.exists() {
+                        // Destination doesn't exist - do fast regular copy instead of delta
+                        let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                        let reflink_options = ReflinkOptions {
+                            mode: options.reflink,
+                        };
+                        
+                        match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, None) {
+                            Ok(bytes) => {
+                                stats.add_bytes_transferred(bytes);
+                                stats.increment_files_copied();
+                                
+                                if options.verbose >= 2 {
+                                    eprintln!(
+                                        "  ✓ Fast copy (new file): {} → {}",
+                                        path.display(),
+                                        dest.display()
+                                    );
                                 }
                             }
-
-                            // Use utility function for progress tracking
-                            update_progress(&self.progress, progress_bar, bytes, start_time);
+                            Err(e) => {
+                                stats.add_error(path.clone(), "copy", &format!("Failed to copy: {}", e));
+                            }
                         }
-                        Err(e) => {
-                            let error_str = e.to_string();
+                    } else {
+                        // Destination exists - check if we should use delta
+                        // First check if concurrent delta analysis has results
+                        let use_delta = {
+                            let analyzer = self.delta_analyzer.lock().unwrap();
+                            
+                            // Check if analysis is complete
+                            if let Some(analysis) = analyzer.get_analysis(path) {
+                                if options.verbose >= 2 {
+                                    eprintln!(
+                                        "  📊 Delta analysis: {}% different ({} of {} blocks)",
+                                        analysis.percentage_different as u32,
+                                        analysis.blocks_different,
+                                        analysis.blocks_total
+                                    );
+                                }
+                                analysis.should_use_delta
+                            } else {
+                                // No analysis available yet - don't use delta by default
+                                // The concurrent analysis is still running in background
+                                // For now, do a regular copy to maintain performance
+                                false
+                            }
+                        };
+                        
+                        if use_delta {
+                            // Use delta transfer
+                            match self.delta_copy_file(path, &dest, options) {
+                            Ok(bytes) => {
+                                stats.add_bytes_transferred(bytes);
+                                stats.increment_files_copied();
 
-                            // Log error to file
-                            if let Some(ref logger) = self.logger {
-                                if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!(
-                                        "Delta transfer failed {} → {}: {}",
+                                // Show on console only with -vv mode
+                                if options.verbose >= 2 {
+                                    eprintln!(
+                                        "  ✓ Delta transfer complete: {} → {} ({} transferred)",
                                         path.display(),
                                         dest.display(),
-                                        error_str
-                                    ));
+                                        humanize_bytes(bytes)
+                                    );
+                                }
+
+                                // Log to file with -v or higher
+                                if options.verbose >= 1 {
+                                    if let Some(ref logger) = self.logger {
+                                        if let Ok(logger) = logger.lock() {
+                                            logger.log_file_operation(
+                                                "Delta transfer complete",
+                                                &format!(
+                                                    "{} → {} ({} bytes)",
+                                                    path.display(),
+                                                    dest.display(),
+                                                    bytes
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Use utility function for progress tracking
+                                update_progress(&self.progress, progress_bar, bytes, start_time);
+                            }
+                            Err(e) => {
+                                let error_str = e.to_string();
+
+                                // Log error to file
+                                if let Some(ref logger) = self.logger {
+                                    if let Ok(logger) = logger.lock() {
+                                        logger.log_error(&format!(
+                                            "Delta transfer failed {} → {}: {}",
+                                            path.display(),
+                                            dest.display(),
+                                            error_str
+                                        ));
+                                    }
+                                }
+
+                                // Convert anyhow::Error to RoboSyncError
+                                let robosync_err = match e.downcast::<std::io::Error>() {
+                                    Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
+                                    Err(e) => RoboSyncError::delta_failed(e.to_string(), path.clone()),
+                                };
+                                stats.add_structured_error(robosync_err, "delta_transfer");
+                            }
+                        }
+                        } else {
+                            // Don't use delta - do regular copy
+                            let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                            let reflink_options = ReflinkOptions {
+                                mode: options.reflink,
+                            };
+                            
+                            match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, Some(&stats)) {
+                                Ok(bytes) => {
+                                    stats.add_bytes_transferred(bytes);
+                                    stats.increment_files_copied();
+                                    
+                                    if options.verbose >= 2 {
+                                        eprintln!(
+                                            "  ✓ Regular copy (delta not beneficial): {} → {} ({})",
+                                            path.display(),
+                                            dest.display(),
+                                            humanize_bytes(bytes)
+                                        );
+                                    }
+                                    
+                                    // Use utility function for progress tracking
+                                    update_progress(&self.progress, progress_bar, bytes, start_time);
+                                }
+                                Err(e) => {
+                                    let robosync_err = RoboSyncError::operation_failed(
+                                        "copy",
+                                        e.to_string(),
+                                    );
+                                    stats.add_structured_error(robosync_err, "copy");
                                 }
                             }
-
-                            // Convert anyhow::Error to RoboSyncError
-                            let robosync_err = match e.downcast::<std::io::Error>() {
-                                Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
-                                Err(e) => RoboSyncError::delta_failed(e.to_string(), path.clone()),
-                            };
-                            stats.add_structured_error(robosync_err, "delta_transfer");
                         }
                     }
                 }
-                FileOperation::Create { path } | FileOperation::Update { path, .. } => {
-                    // Use reflink-aware copying for new large files or updates without checksum
+                FileOperation::Create { path } => {
+                    // Use reflink-aware copying for new large files
+                    if options.verbose >= 1 {
+                        // Get file size for progress reporting
+                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        eprintln!(
+                            "[{}] Starting large file copy: {} ({})",
+                            timestamp(),
+                            path.display(),
+                            humanize_bytes(size)
+                        );
+                    }
                     let dest = match prepare_destination_path(path, source_root, dest_root) {
                         Ok(dest) => dest,
                         Err(e) => {
@@ -1342,7 +1673,8 @@ impl MixedStrategyExecutor {
                             // Show on console only with -vv mode
                             if options.verbose >= 2 {
                                 eprintln!(
-                                    "  ✓ Copied (large): {} → {} ({} bytes)",
+                                    "[{}]   ✓ Copied (large): {} → {} ({} bytes)",
+                                    timestamp(),
                                     path.display(),
                                     dest.display(),
                                     bytes
@@ -1527,69 +1859,97 @@ impl MixedStrategyExecutor {
                         }
                     }
 
-                    match self.delta_copy_file(path, &dest, options) {
-                        Ok(bytes) => {
-                            stats.add_bytes_transferred(bytes);
-                            stats.increment_files_copied();
-
-                            // Log completion to console only with -vv
-                            if options.verbose >= 2 {
-                                eprintln!(
-                                    "  ✓ Delta transfer complete: {} → {} ({} transferred)",
-                                    path.display(),
-                                    dest.display(),
-                                    humanize_bytes(bytes)
-                                );
-                            }
-
-                            // Log to file with -v or higher
-                            if options.verbose >= 1 {
-                                if let Some(ref logger) = self.logger {
-                                    if let Ok(logger) = logger.lock() {
-                                        logger.log_file_operation(
-                                            "Delta transfer complete",
-                                            &format!(
-                                                "{} → {} ({} bytes)",
-                                                path.display(),
-                                                dest.display(),
-                                                bytes
-                                            ),
-                                        );
-                                    }
+                    // STARTUP OPTIMIZATION: Skip expensive checksum generation if destination doesn't exist
+                    if !dest.exists() {
+                        // Destination doesn't exist - do fast regular copy instead of delta
+                        let copy_flags = CopyFlags::from_string(&options.copy_flags);
+                        let reflink_options = ReflinkOptions {
+                            mode: options.reflink,
+                        };
+                        
+                        match copy_file_with_metadata_and_reflink(path, &dest, &copy_flags, &reflink_options, None) {
+                            Ok(bytes) => {
+                                stats.add_bytes_transferred(bytes);
+                                stats.increment_files_copied();
+                                
+                                if options.verbose >= 2 {
+                                    eprintln!(
+                                        "  ✓ Fast copy (new file): {} → {}",
+                                        path.display(),
+                                        dest.display()
+                                    );
                                 }
+                                update_progress(&self.progress, progress_bar, bytes, start_time);
                             }
-
-                            if let Some(pb) = progress_bar {
-                                pb.inc(1);
-                                pb.set_message(format!(
-                                    "{} transferred (delta)",
-                                    humanize_bytes(stats.bytes_transferred())
-                                ));
+                            Err(e) => {
+                                stats.add_error(path.clone(), "copy", &format!("Failed to copy: {}", e));
                             }
-                            self.progress.add_file();
-                            self.progress.add_bytes(bytes);
                         }
-                        Err(e) => {
-                            let error_str = e.to_string();
+                    } else {
+                        match self.delta_copy_file(path, &dest, options) {
+                            Ok(bytes) => {
+                                stats.add_bytes_transferred(bytes);
+                                stats.increment_files_copied();
 
-                            // Log error to file
-                            if let Some(ref logger) = self.logger {
-                                if let Ok(logger) = logger.lock() {
-                                    logger.log_error(&format!(
-                                        "Delta transfer failed {} → {}: {}",
+                                // Log completion to console only with -vv
+                                if options.verbose >= 2 {
+                                    eprintln!(
+                                        "  ✓ Delta transfer complete: {} → {} ({} transferred)",
                                         path.display(),
                                         dest.display(),
-                                        error_str
+                                        humanize_bytes(bytes)
+                                    );
+                                }
+
+                                // Log to file with -v or higher
+                                if options.verbose >= 1 {
+                                    if let Some(ref logger) = self.logger {
+                                        if let Ok(logger) = logger.lock() {
+                                            logger.log_file_operation(
+                                                "Delta transfer complete",
+                                                &format!(
+                                                    "{} → {} ({} bytes)",
+                                                    path.display(),
+                                                    dest.display(),
+                                                    bytes
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if let Some(pb) = progress_bar {
+                                    pb.inc(1);
+                                    pb.set_message(format!(
+                                        "{} transferred (delta)",
+                                        humanize_bytes(stats.bytes_transferred())
                                     ));
                                 }
+                                self.progress.add_file();
+                                self.progress.add_bytes(bytes);
                             }
+                            Err(e) => {
+                                let error_str = e.to_string();
 
-                            // Convert anyhow::Error to RoboSyncError
-                            let robosync_err = match e.downcast::<std::io::Error>() {
-                                Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
-                                Err(e) => RoboSyncError::delta_failed(e.to_string(), path.clone()),
-                            };
-                            stats.add_structured_error(robosync_err, "delta_transfer");
+                                // Log error to file
+                                if let Some(ref logger) = self.logger {
+                                    if let Ok(logger) = logger.lock() {
+                                        logger.log_error(&format!(
+                                            "Delta transfer failed {} → {}: {}",
+                                            path.display(),
+                                            dest.display(),
+                                            error_str
+                                        ));
+                                    }
+                                }
+
+                                // Convert anyhow::Error to RoboSyncError
+                                let robosync_err = match e.downcast::<std::io::Error>() {
+                                    Ok(io_err) => RoboSyncError::io_error(io_err, Some(path.clone())),
+                                    Err(e) => RoboSyncError::delta_failed(e.to_string(), path.clone()),
+                                };
+                                stats.add_structured_error(robosync_err, "delta_transfer");
+                            }
                         }
                     }
                 }

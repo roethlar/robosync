@@ -15,11 +15,12 @@ pub struct SyncLogger {
     total_bytes: u64,
     transferred_bytes: u64,
     show_eta: bool,
+    verbose_level: u8,
 }
 
 impl SyncLogger {
     /// Create a new logger with optional log file
-    pub fn new(log_file_path: Option<&str>, show_eta: bool) -> Result<Self> {
+    pub fn new(log_file_path: Option<&str>, show_eta: bool, verbose_level: u8) -> Result<Self> {
         let log_file = if let Some(path) = log_file_path {
             let file = File::create(path)?;
             Some(Arc::new(Mutex::new(BufWriter::new(file))))
@@ -35,6 +36,7 @@ impl SyncLogger {
             total_bytes: 0,
             transferred_bytes: 0,
             show_eta,
+            verbose_level,
         })
     }
 
@@ -48,14 +50,19 @@ impl SyncLogger {
 
     /// Log a message to both console and file (if configured)
     pub fn log(&self, message: &str) {
-        // Always print to console
-        println!("{message}");
+        // Only show timestamps with -v flag
+        if self.verbose_level > 0 {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            println!("[{timestamp}] {message}");
+        } else {
+            println!("{message}");
+        }
 
         // Also write to log file if configured
         if let Some(ref log_file) = self.log_file {
             if let Ok(mut writer) = log_file.lock() {
-                let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-                let _ = writeln!(writer, "[{timestamp}] {message}");
+                let file_timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+                let _ = writeln!(writer, "[{file_timestamp}] {message}");
                 // Flush immediately to ensure log is written
                 let _ = writer.flush();
             }
@@ -271,11 +278,12 @@ mod tests {
 
     #[test]
     fn test_logger_creation() -> Result<()> {
-        let mut logger = SyncLogger::new(None, true)?;
+        let mut logger = SyncLogger::new(None, true, 1)?;
         logger.initialize_progress(100, 1000000);
         assert_eq!(logger.total_files, 100);
         assert_eq!(logger.total_bytes, 1000000);
         assert!(logger.show_eta);
+        assert_eq!(logger.verbose_level, 1);
         Ok(())
     }
 }

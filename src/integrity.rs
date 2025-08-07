@@ -12,15 +12,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Result, Context, bail};
-use sha2::{Sha256, Digest};
+use blake3;
 use serde::{Serialize, Deserialize};
 
 /// Checksum algorithms supported for integrity verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChecksumAlgorithm {
-    Sha256,
-    Blake3,
-    Xxh3,
+    Blake3,  // Default: Cryptographically secure, extremely fast
+    Xxh3,    // Non-cryptographic but ultra-fast for checksums
+    Sha256,  // Legacy compatibility only
 }
 
 /// Comprehensive error information for audit trails
@@ -70,7 +70,7 @@ impl IntegrityManager {
     /// Create new integrity manager with enterprise defaults
     pub fn new() -> Self {
         Self {
-            checksum_algorithm: ChecksumAlgorithm::Sha256,
+            checksum_algorithm: ChecksumAlgorithm::Blake3,  // Modern default: fast and secure
             verify_after_copy: true,
             atomic_operations: true,
             error_log: Vec::new(),
@@ -99,7 +99,44 @@ impl IntegrityManager {
             .with_context(|| format!("Failed to open file for checksum: {}", path.display()))?;
         
         match self.checksum_algorithm {
+            ChecksumAlgorithm::Blake3 => {
+                let mut hasher = blake3::Hasher::new();
+                let mut buffer = [0u8; 8192];
+                
+                loop {
+                    let bytes_read = file.read(&mut buffer)
+                        .with_context(|| format!("Failed to read file for checksum: {}", path.display()))?;
+                    
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    
+                    hasher.update(&buffer[..bytes_read]);
+                }
+                
+                Ok(hasher.finalize().to_hex().to_string())
+            }
+            ChecksumAlgorithm::Xxh3 => {
+                use xxhash_rust::xxh3::Xxh3;
+                let mut hasher = Xxh3::new();
+                let mut buffer = [0u8; 8192];
+                
+                loop {
+                    let bytes_read = file.read(&mut buffer)
+                        .with_context(|| format!("Failed to read file for checksum: {}", path.display()))?;
+                    
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    
+                    hasher.update(&buffer[..bytes_read]);
+                }
+                
+                Ok(format!("{:016x}", hasher.digest()))
+            }
             ChecksumAlgorithm::Sha256 => {
+                // Legacy SHA256 support for compatibility
+                use sha2::{Sha256, Digest};
                 let mut hasher = Sha256::new();
                 let mut buffer = [0u8; 8192];
                 
@@ -116,7 +153,6 @@ impl IntegrityManager {
                 
                 Ok(format!("{:x}", hasher.finalize()))
             }
-            _ => bail!("Checksum algorithm not implemented: {:?}", self.checksum_algorithm),
         }
     }
 
@@ -298,13 +334,13 @@ impl IntegrityManager {
         {
             use std::os::windows::ffi::OsStrExt;
             use winapi::um::fileapi::GetDiskFreeSpaceExW;
-            use winapi::shared::minwindef::DWORD;
+            use winapi::um::winnt::ULARGE_INTEGER;
             
             let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
             
-            let mut free_bytes_available = 0u64;
-            let mut total_bytes = 0u64;
-            let mut total_free_bytes = 0u64;
+            let mut free_bytes_available: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
+            let mut total_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
+            let mut total_free_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
             
             let result = unsafe {
                 GetDiskFreeSpaceExW(
@@ -316,7 +352,9 @@ impl IntegrityManager {
             };
             
             if result != 0 {
-                Ok(free_bytes_available)
+                unsafe {
+                    Ok(*free_bytes_available.QuadPart())
+                }
             } else {
                 bail!("Failed to get disk space information for: {}", path.display());
             }
@@ -569,7 +607,7 @@ mod tests {
     #[test]
     fn test_integrity_manager_creation() {
         let manager = IntegrityManager::new();
-        assert_eq!(manager.checksum_algorithm, ChecksumAlgorithm::Sha256);
+        assert_eq!(manager.checksum_algorithm, ChecksumAlgorithm::Blake3);
         assert!(manager.verify_after_copy);
         assert!(manager.atomic_operations);
     }
@@ -583,8 +621,8 @@ mod tests {
         let manager = IntegrityManager::new();
         let checksum = manager.compute_checksum(&test_file).expect("Failed to compute checksum");
         
-        // SHA256 of "Hello, World!" 
-        assert_eq!(checksum, "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f");
+        // Blake3 of "Hello, World!" 
+        assert_eq!(checksum, "ede5c0b10f2ec4979c69b52f61e42ff5b413519ce09be0f14d098dcfe5f6f98d");
     }
 
     #[test]

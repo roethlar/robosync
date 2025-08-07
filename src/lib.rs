@@ -29,6 +29,7 @@ pub mod options;
 pub mod parallel_sync;
 pub mod platform_api;
 pub mod progress;
+pub mod progress_display;
 pub mod retry;
 pub mod strategy;
 pub mod streaming_delta;
@@ -43,6 +44,12 @@ pub mod integrity;
 pub mod safe_ops;
 pub mod mission_critical;
 pub mod streaming_batch;
+pub mod streaming_batch_fast;
+pub mod speculative_tar;
+pub mod worker_pool;
+pub mod hybrid_dam;
+pub mod concurrent_delta;
+pub mod streaming_walker;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]
@@ -53,16 +60,18 @@ pub mod linux_parallel_sync;
 
 #[cfg(target_os = "linux")]
 pub mod fast_batch_copy;
+
+// Cross-platform modules
 pub mod small_file_optimizer;
 pub mod ultra_fast_copy;
+pub mod network_fs;
 
+// Linux-specific modules
 #[cfg(target_os = "linux")]
 pub mod io_uring;
 
 #[cfg(target_os = "linux")]
 pub mod extent_copy;
-
-pub mod network_fs;
 
 #[cfg(target_os = "windows")]
 pub mod windows_symlinks;
@@ -70,6 +79,7 @@ pub mod windows_symlinks;
 #[cfg(target_os = "windows")]
 pub mod windows_fast_enum;
 
+// macOS modules
 #[cfg(target_os = "macos")]
 pub mod macos_mmap;
 

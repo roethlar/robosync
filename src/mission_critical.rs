@@ -67,7 +67,7 @@ impl Default for MissionCriticalConfig {
             verify_integrity: true,
             atomic_operations: true,
             require_checksums: true,
-            checksum_algorithm: ChecksumAlgorithm::Sha256,
+            checksum_algorithm: ChecksumAlgorithm::Blake3,  // Modern default: fast and secure
             max_retry_attempts: 3,
             minimum_free_space_mb: 1024, // 1GB minimum free space
         }

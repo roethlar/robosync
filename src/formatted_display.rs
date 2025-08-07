@@ -5,8 +5,8 @@ use crate::sync_stats::SyncStats;
 use crossterm::style::Color;
 use indicatif::{ProgressBar, ProgressStyle};
 
-// Import the detailed stats structs from mixed_strategy
-pub use crate::mixed_strategy::{DetailedPendingStats, SizeBreakdown};
+// Import the detailed stats structs from hybrid_dam (migrated from mixed_strategy)
+pub use crate::hybrid_dam::{DetailedPendingStats, SizeBreakdown};
 
 /// Display formatted header
 pub fn print_header(
@@ -156,56 +156,56 @@ pub fn print_pending_operations_detailed(stats: &DetailedPendingStats, _verbose_
     println!();
 
     // Files to create with breakdown
-    if stats.basic.files_create > 0 {
+    if stats.files_create > 0 {
         println!(
             "Files to create: {}",
-            format_number(stats.basic.files_create).color_if(Color::Green)
+            format_number(stats.files_create).color_if(Color::Green)
         );
         print_size_breakdown(&stats.create_breakdown, "");
     }
 
     // Files to update with breakdown
-    if stats.basic.files_update > 0 {
+    if stats.files_update > 0 {
         println!(
             "Files to update: {}",
-            format_number(stats.basic.files_update).color_if(Color::Yellow)
+            format_number(stats.files_update).color_if(Color::Yellow)
         );
         print_size_breakdown(&stats.update_breakdown, "");
     }
 
     // Files to delete (no breakdown needed)
-    if stats.basic.files_delete > 0 {
+    if stats.files_delete > 0 {
         println!(
             "Files to delete: {}",
-            format_number(stats.basic.files_delete).color_if(Color::Red)
+            format_number(stats.files_delete).color_if(Color::Red)
         );
     }
 
     // Directories to create
-    if stats.basic.dirs_create > 0 {
+    if stats.dirs_create > 0 {
         println!(
             "Directories to create: {}",
-            format_number(stats.basic.dirs_create).color_if(Color::Green)
+            format_number(stats.dirs_create).color_if(Color::Green)
         );
     }
 
     // Total summary
-    let total_operations = stats.basic.files_create
-        + stats.basic.files_update
-        + stats.basic.files_delete
-        + stats.basic.dirs_create;
+    let total_operations = stats.files_create
+        + stats.files_update
+        + stats.files_delete
+        + stats.dirs_create;
 
     // Calculate actual transfer size considering delta optimization
     let actual_transfer = stats.create_breakdown.small_size
         + stats.create_breakdown.medium_size
         + stats.create_breakdown.large_size
-        + stats.create_breakdown.delta_actual
+        + stats.create_breakdown.delta_size
         + stats.update_breakdown.small_size
         + stats.update_breakdown.medium_size
         + stats.update_breakdown.large_size
-        + stats.update_breakdown.delta_actual;
+        + stats.update_breakdown.delta_size;
 
-    let total_file_size = stats.basic.size_create + stats.basic.size_update;
+    let total_file_size = stats.size_create + stats.size_update;
 
     if total_file_size > actual_transfer {
         let saved = total_file_size - actual_transfer;
@@ -249,23 +249,12 @@ fn print_size_breakdown(breakdown: &SizeBreakdown, _indent: &str) {
         );
     }
     if breakdown.delta_count > 0 {
-        if breakdown.delta_actual < breakdown.delta_size {
-            let percent =
-                (breakdown.delta_actual as f64 / breakdown.delta_size as f64 * 100.0) as u64;
-            println!(
-                "Delta:  {:>6} files, {:>8} (~{}% change, ~{} delta)",
-                format_number(breakdown.delta_count).color_if(Color::Cyan),
-                format_bytes_short(breakdown.delta_size),
-                percent,
-                format_bytes_short(breakdown.delta_actual).color_if(Color::Cyan)
-            );
-        } else {
-            println!(
-                "Delta:  {:>6} files, {:>8}",
-                format_number(breakdown.delta_count).color_if(Color::Cyan),
-                format_bytes_short(breakdown.delta_size)
-            );
-        }
+        // Since we don't have delta_actual, just show the delta size
+        println!(
+            "Delta:  {:>6} files, {:>8}",
+            format_number(breakdown.delta_count).color_if(Color::Cyan),
+            format_bytes_short(breakdown.delta_size)
+        );
     }
 }
 

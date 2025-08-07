@@ -52,14 +52,29 @@ impl ErrorLogger {
 
     /// Log an error (saves to file and optionally prints to console)
     pub fn log_error(&self, path: &Path, message: &str, operation: &str) {
-        // Always save to error report (unless disabled)
+        let full_message = format!("{operation}: {message}");
+        let mut logged_to_file = false;
+        
+        // Try to save to error report (unless disabled)
         if let Some(ref handle) = self.error_handle {
-            let full_message = format!("{operation}: {message}");
-            handle.add_error(path, &full_message);
+            // Check if error logging succeeds
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle.add_error(path, &full_message);
+            })) {
+                Ok(_) => logged_to_file = true,
+                Err(_) => {
+                    // Error logging failed - use console fallback
+                    eprintln!("[ERROR] Failed to write error to log file");
+                    eprintln!("[ERROR] {}: {} - {}", operation, path.display(), message);
+                }
+            }
         }
-
-        // Never print errors to console during execution - they break the progress bar
-        // Errors are always saved to the error report file
+        
+        // If error logging is disabled or failed, and this is a critical error, warn to console
+        if !logged_to_file && !self.options.no_report_errors {
+            eprintln!("[WARNING] Error logging unavailable - displaying on console:");
+            eprintln!("[ERROR] {}: {} - {}", operation, path.display(), message);
+        }
 
         // Log operation if verbose >= 2
         if self.options.verbose >= 2 {
@@ -74,14 +89,31 @@ impl ErrorLogger {
 
     /// Log a warning (saves to file and optionally prints to console)
     pub fn log_warning(&self, path: &Path, message: &str, operation: &str) {
-        // Always save to error report (unless disabled)
+        let full_message = format!("{operation}: {message}");
+        let mut logged_to_file = false;
+        
+        // Try to save to error report (unless disabled)
         if let Some(ref handle) = self.error_handle {
-            let full_message = format!("{operation}: {message}");
-            handle.add_warning(path, &full_message);
+            // Check if warning logging succeeds
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle.add_warning(path, &full_message);
+            })) {
+                Ok(_) => logged_to_file = true,
+                Err(_) => {
+                    // Warning logging failed - use console fallback
+                    eprintln!("[WARNING] Failed to write warning to log file");
+                    eprintln!("[WARNING] {}: {} - {}", operation, path.display(), message);
+                }
+            }
         }
-
-        // Never print warnings to console during execution - they break the progress bar
-        // Warnings are always saved to the error report file
+        
+        // If warning logging is disabled or failed, and this is important, warn to console
+        if !logged_to_file && !self.options.no_report_errors {
+            // Only show important warnings on console to avoid spam
+            if message.contains("locked") || message.contains("permission") || message.contains("access denied") {
+                eprintln!("[WARNING] {}: {} - {}", operation, path.display(), message);
+            }
+        }
 
         // Log operation if verbose >= 2
         if self.options.verbose >= 2 {
@@ -199,14 +231,28 @@ pub struct ErrorLogHandle {
 impl ErrorLogHandle {
     /// Log an error (saves to file and optionally prints to console)
     pub fn log_error(&self, path: &Path, message: &str, operation: &str) {
-        // Always save to error report (unless disabled)
+        let full_message = format!("{operation}: {message}");
+        let mut logged_to_file = false;
+        
+        // Try to save to error report (unless disabled)
         if let Some(ref handle) = self.error_handle {
-            let full_message = format!("{operation}: {message}");
-            handle.add_error(path, &full_message);
+            // Check if error logging succeeds
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle.add_error(path, &full_message);
+            })) {
+                Ok(_) => logged_to_file = true,
+                Err(_) => {
+                    // Error logging failed - use console fallback
+                    eprintln!("[ERROR] Failed to write error to log file");
+                    eprintln!("[ERROR] {}: {} - {}", operation, path.display(), message);
+                }
+            }
         }
-
-        // Never print errors to console during execution - they break the progress bar
-        // Errors are always saved to the error report file
+        
+        // If error logging failed, ensure user sees critical errors
+        if !logged_to_file {
+            eprintln!("[ERROR] {}: {} - {}", operation, path.display(), message);
+        }
 
         // Log operation if verbose >= 2
         if self.verbose >= 2 {
@@ -221,14 +267,30 @@ impl ErrorLogHandle {
 
     /// Log a warning (saves to file and optionally prints to console)
     pub fn log_warning(&self, path: &Path, message: &str, operation: &str) {
-        // Always save to error report (unless disabled)
+        let full_message = format!("{operation}: {message}");
+        let mut logged_to_file = false;
+        
+        // Try to save to error report (unless disabled)
         if let Some(ref handle) = self.error_handle {
-            let full_message = format!("{operation}: {message}");
-            handle.add_warning(path, &full_message);
+            // Check if warning logging succeeds
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle.add_warning(path, &full_message);
+            })) {
+                Ok(_) => logged_to_file = true,
+                Err(_) => {
+                    // Warning logging failed - use console fallback for important warnings
+                    if message.contains("locked") || message.contains("permission") || message.contains("access denied") {
+                        eprintln!("[WARNING] Failed to write warning to log file");
+                        eprintln!("[WARNING] {}: {} - {}", operation, path.display(), message);
+                    }
+                }
+            }
         }
-
-        // Never print warnings to console during execution - they break the progress bar
-        // Warnings are always saved to the error report file
+        
+        // If warning logging failed and this is important, show to user
+        if !logged_to_file && (message.contains("locked") || message.contains("permission") || message.contains("access denied")) {
+            eprintln!("[WARNING] {}: {} - {}", operation, path.display(), message);
+        }
 
         // Log operation if verbose >= 2
         if self.verbose >= 2 {

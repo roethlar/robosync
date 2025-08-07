@@ -1,44 +1,50 @@
 # RoboSync 🚀
 
-**Lightning-fast file synchronization that just works.**
+**High-performance file synchronization with intelligent strategy selection**
 
+[![Version](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/yourusername/robosync/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platform-support)
 
-RoboSync combines the battle-tested reliability of RoboCopy and rsync with modern Rust performance. Sync terabytes with confidence using smart strategies that adapt to your workload.
+RoboSync is a cross-platform file synchronization tool built in Rust, designed to automatically select the optimal copying strategy based on your files. It combines parallel processing, delta transfers, and platform-specific optimizations to achieve maximum performance.
 
-## 🎯 Why RoboSync?
+## 🎯 Key Features
 
-- **🏎️ Blazing Fast**: Multi-threaded parallel processing that saturates your storage bandwidth
-- **🧠 Smart Defaults**: Automatically picks the best strategy for your files - no PhD required
-- **🔒 Rock Solid**: Zero panics, comprehensive error handling, and automatic error reports
-- **🌍 Cross-Platform**: One tool that works everywhere - Linux, macOS, and Windows
-- **📊 Real Feedback**: Know exactly what's happening with progress bars, ETAs, and detailed logging
+- **🏎️ Adaptive Performance**: Automatically selects optimal strategy based on file sizes and counts
+- **🧠 Smart Categorization**: Different strategies for small, medium, and large files running concurrently
+- **🔒 Enterprise Ready**: Comprehensive error handling, retry logic, and detailed logging
+- **🌍 Cross-Platform**: Native support for Linux, macOS, and Windows with platform-specific optimizations
+- **📊 Real-time Feedback**: Progress bars, transfer speeds, ETAs, and detailed operation logs
 
 ## ✨ Features
 
-### ⚡ Performance That Scales
-- **Concurrent Mixed Processing** - Different strategies for different file sizes, all running in parallel:
-  - Small files (< 1MB): Lightning-fast parallel copies
-  - Medium files (1-100MB): Platform-optimized APIs
-  - Large files (> 100MB): Delta transfer with 64KB blocks
-- **Delta-Transfer Algorithm** - Only copy what changed in large files
-- **Smart Compression** - Zstandard and LZ4 for optimal network transfers
-- **Platform Optimizations** - io_uring on Linux, native APIs everywhere
+### ⚡ Performance Optimizations
+- **Mixed Strategy Mode** - Concurrent execution of different strategies:
+  - Small files (< 256KB): Parallel batch processing for maximum throughput
+  - Medium files (256KB - 16MB): Optimized platform-specific APIs
+  - Large files (16MB - 100MB): Standard optimized copying
+  - Huge files (> 100MB): Delta transfer algorithm with configurable block size
+- **Delta Transfer** - Only transfer changed blocks in large files
+- **Compression Support** - Automatic algorithm selection (Zstandard/LZ4)
+- **Platform-Specific Features**:
+  - Linux: io_uring support, splice system calls, FIEMAP for extent-based copying
+  - macOS: Optimized for APFS with copy-on-write support
+  - Windows: Native Win32 APIs, NTFS alternate data streams support
 
-### 🛡️ Enterprise-Ready Reliability
-- **Automatic Error Reports** - Never lose track of what failed
-- **Retry Logic** - Configurable retries with exponential backoff
-- **Metadata Preservation** - Timestamps, permissions, ownership, all preserved
-- **Symlink Support** - Handle links your way: copy, follow, or skip
-- **Network Support** - Works with mounted network drives (SMB/NFS/SSHFS)
+### 🛡️ Reliability Features
+- **Error Management** - Automatic error report generation with detailed failure information
+- **Retry Mechanism** - Configurable retry attempts with customizable wait periods
+- **Metadata Preservation** - Full support for timestamps, permissions, ownership, and attributes
+- **Symlink Handling** - Three modes: preserve, follow, or skip
+- **Network Filesystem Support** - Optimized for SMB/CIFS, NFS, SSHFS, and WebDAV
+- **Enterprise Mode** - Optional integrity verification and atomic operations
 
-### 🎮 Developer-Friendly Interface
-- **RoboCopy Compatible** - Your muscle memory still works
-- **Multi-Level Verbosity** - From silent to full debug output
-- **Dry Run Mode** - See what would happen before it does
-- **Interactive Confirmation** - Double-check before big operations
+### 🎮 User Experience
+- **Familiar Syntax** - RoboCopy-style commands with Unix conventions
+- **Flexible Verbosity** - Multiple levels from silent to debug output
+- **Safety Features** - Dry run mode, confirmation prompts, list-only mode
+- **Progress Tracking** - Real-time progress bars with speed and ETA
 
 ## 🚀 Quick Start
 
@@ -58,23 +64,25 @@ yay -S robosync
 # Arch Linux (AUR) - using paru
 paru -S robosync
 
-# Using Rust's Cargo
+# Using Rust's Cargo (requires Rust 1.70+)
 cargo install robosync
-
-# Update to latest version
-cargo install --force robosync
 ```
 
 #### Build from Source
 
 ```bash
-# Clone and build
-git clone https://github.com/roethlar/robosync.git
+# Clone the repository
+git clone https://github.com/yourusername/robosync.git
 cd robosync
+
+# Build optimized binary
 cargo build --release
 
-# Copy to your PATH
+# Install to system (Unix/Linux/macOS)
 sudo cp target/release/robosync /usr/local/bin/
+
+# Or add to PATH (Windows)
+# Add target\release to your PATH environment variable
 ```
 
 ### Your First Sync
@@ -111,12 +119,12 @@ robosync /var/www/ /mnt/server/var/www/ --mir \
   --mt 16
 ```
 
-### 📸 Organize Photos by Date
+### 📸 Backup Large Media Files
 ```bash
-robosync /camera/DCIM/ /photos/2024/ -e \
+robosync /camera/DCIM/ /backup/photos/ -e \
   --min 1048576 \  # Skip files < 1MB
-  --copy DATSOU \  # Preserve all metadata
-  --no-report-errors  # Photos are already backed up
+  --copyall \      # Preserve all metadata
+  --progress        # Show transfer progress
 ```
 
 ### 🎮 Sync Game Saves
@@ -153,17 +161,17 @@ robosync "C:\Users\Gamer\SavedGames" "D:\Backup\Saves" \
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--mt` | Thread count | CPU cores |
-| `-b` | Block size for delta | 1024 bytes |
-| `--strategy` | Force specific strategy | `mixed` |
+| `-b` | Delta algorithm block size | 1024 bytes |
+| `--strategy` | Force specific strategy | auto-select |
 
-### File Size Categories (shown in -v mode)
+### File Size Categories
 
-| Category | Size Range | Strategy | Color |
-|----------|-----------|----------|-------|
-| Small | < 256KB | Parallel batch processing | Green |
-| Medium | 256KB - 10MB | Platform-optimized APIs | Yellow |
-| Large | 10MB - 100MB | Standard copy | Red |
-| Delta | > 100MB | Delta transfer algorithm | Cyan |
+| Category | Default Range | Strategy | Configurable |
+|----------|--------------|----------|-------------|
+| Small | < 256KB | Parallel batch processing | `--small-file-threshold` |
+| Medium | 256KB - 16MB | Optimized transfer | `--medium-file-threshold` |
+| Large | 16MB - 100MB | Standard copy | `--large-file-threshold` |
+| Huge | > 100MB | Delta transfer algorithm | `--large-file-threshold` |
 
 ### Safety & Control
 
@@ -176,43 +184,44 @@ robosync "C:\Users\Gamer\SavedGames" "D:\Backup\Saves" \
 
 ## 📊 Performance Benchmarks
 
-Real-world performance on commodity hardware:
+Performance comparison vs native tools (rsync/robocopy):
 
-| Scenario | Files | Total Size | Time | Throughput |
-|----------|-------|-----------|------|------------|
-| Small files (< 1MB) | 100,000 | 12 GB | 45s | 267 MB/s |
-| Large files (> 100MB) | 50 | 200 GB | 62s | 3.2 GB/s |
-| Mixed workload | 10,000 | 50 GB | 35s | 1.4 GB/s |
-| Delta update (10% changed) | 1 | 100 GB | 18s | 556 MB/s |
+| Platform | Scenario | RoboSync | Native Tool | Improvement |
+|----------|----------|----------|-------------|-------------|
+| Linux | Small files (5K × 1KB) | 0.008s | 0.051s (rsync) | 6.4× faster |
+| Linux | Medium files (100 × 512KB) | 0.013s | 0.064s (rsync) | 4.9× faster |
+| macOS | Large files (50 × 30MB) | 1s | 4s (rsync) | 4× faster |
+| Windows | Sparse files (100MB) | 3146 MB/s | 3105 MB/s (robocopy) | 1.01× faster |
 
-*Tested on NVMe SSD with 16 threads*
+*Results vary based on hardware, filesystem, and network conditions*
 
 ## 🔧 Advanced Usage
 
 ### Force Specific Strategies
 
 ```bash
-# Best for many small files
+# Force parallel processing for many small files
 robosync /source /dest --strategy parallel
 
-# Best for large file updates
+# Force delta transfer for large files with changes
 robosync /source /dest --strategy delta
 
-# Use native tools (rsync/robocopy)
-robosync /source /dest --strategy rsync
+# Use automatic mixed strategy (default)
+robosync /source /dest --strategy mixed
 ```
 
 ### Platform-Specific Optimizations
 
 ```bash
-# Linux: Enable io_uring for maximum performance
-robosync /source /dest --strategy io_uring
-
-# Linux: Optimize for many small files
+# Linux: Enable all platform optimizations
 robosync /source /dest --linux-optimized
 
-# Windows: Use native robocopy
-robosync C:\source D:\dest --strategy robocopy
+# Control reflink/COW behavior
+robosync /source /dest --reflink always  # Force copy-on-write
+robosync /source /dest --reflink never   # Disable COW
+
+# Enterprise mode with integrity checks
+robosync /source /dest --enterprise --verify
 ```
 
 ### Error Handling
@@ -235,8 +244,14 @@ robosync /source /dest -e --no-report-errors
 
 ## 📝 Important Notes
 
-### Network Transfers
-RoboSync operates on local and mounted filesystems including network mounts like NFS, SMB/CIFS, and SSHFS. Mount your network drives first, then use RoboSync for blazing fast synchronized transfers.
+### Network Filesystem Support
+RoboSync automatically detects and optimizes for network filesystems:
+- **NFS**: Large buffers (1MB) for maximum throughput
+- **SMB/CIFS**: Moderate buffers (512KB) to respect protocol limits
+- **SSHFS**: Small buffers (64KB) due to SSH encryption overhead
+- **WebDAV**: Minimal buffers (32KB) for HTTP efficiency
+
+Mount your network drives first, then use RoboSync for optimized transfers.
 
 ## 🏗️ Architecture
 
@@ -263,19 +278,22 @@ RoboSync uses a sophisticated strategy selection system:
 ## 🌍 Platform Support
 
 ### Linux 🐧
-- **io_uring** support for bleeding-edge performance
-- Adaptive thread limits based on system resources
-- Native rsync integration when beneficial
+- **io_uring** support for asynchronous I/O (when available)
+- **FIEMAP** for extent-based copying on ext4/XFS
+- **splice** system calls for zero-copy transfers
+- Adaptive thread limits based on file descriptor limits
 
 ### macOS 🍎
-- Optimized for APFS and HFS+
-- Conservative threading for system stability
-- Full metadata preservation including extended attributes
+- **APFS** optimizations with copy-on-write support
+- **clonefile** support for instant copies when possible
+- Extended attribute preservation
+- Conservative threading (64 threads max) for stability
 
 ### Windows 🪟
-- Native Win32 APIs for maximum compatibility
-- RoboCopy fallback for complex scenarios
-- Full NTFS metadata support
+- **Win32 API** integration for optimal performance
+- **NTFS** alternate data streams support
+- **ReFS** reflink support for instant copies
+- Higher thread limits (256) for parallel operations
 
 ## 🤝 Contributing
 

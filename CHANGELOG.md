@@ -2,6 +2,14 @@
 
 All notable changes to RoboSync will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Improved CLI help text for better clarity and accuracy
+- Updated README with more accurate performance benchmarks and feature descriptions
+- Clarified strategy options (removed non-existent "simple" and "batch" strategies)
+- Enhanced documentation to reflect actual capabilities
+
 ## [2.0.0] - 2025-08-05 🚀 PERFORMANCE REVOLUTION
 
 ### 🏆 BREAKTHROUGH PERFORMANCE ACHIEVEMENTS

@@ -950,8 +950,15 @@ fn needs_update_fast(source: &FileInfo, target: &FileInfo, options: &SyncOptions
         return true;
     }
 
-    // Then check modification time
-    source.modified > target.modified
+    // Timestamp comparison with tolerance for network drives
+    // Network filesystems often have timestamp precision issues
+    const TIMESTAMP_TOLERANCE_SECONDS: u64 = 2;
+    
+    match (source.modified.duration_since(target.modified), target.modified.duration_since(source.modified)) {
+        (Ok(source_newer), _) => source_newer.as_secs() > TIMESTAMP_TOLERANCE_SECONDS,
+        (_, Ok(target_newer)) => false, // Target is newer, no update needed
+        _ => false, // If we can't determine, assume no update needed
+    }
 }
 
 /// Fast delta algorithm decision

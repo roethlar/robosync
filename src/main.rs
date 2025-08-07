@@ -9,6 +9,7 @@ use robosync::options::{load_config, SymlinkBehavior, SyncOptions};
 use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 use robosync::reflink::ReflinkMode;
 use robosync::sync;
+use robosync::worker_pool;
 
 /// Get the maximum safe thread count based on OS file handle limits
 fn get_max_thread_count() -> usize {
@@ -97,15 +98,15 @@ fn get_max_thread_count() -> usize {
 fn build_cli() -> Command {
     Command::new("RoboSync")
         .version(env!("CARGO_PKG_VERSION"))
-        .about("Fast, parallel file synchronization with delta-transfer algorithm")
+        .about("High-performance file synchronization tool with intelligent strategy selection")
         .arg(
             Arg::new("source")
-                .help("Source directory or file")
+                .help("Source path (file or directory to copy from)")
                 .value_parser(clap::value_parser!(PathBuf))
         )
         .arg(
             Arg::new("destination")
-                .help("Destination directory or file")
+                .help("Destination path (where to copy files to)")
                 .value_parser(clap::value_parser!(PathBuf))
         )
 
@@ -114,39 +115,40 @@ fn build_cli() -> Command {
             Arg::new("subdirs")
                 .short('s')
                 .short_alias('S')
-                .help("Copy subdirectories, but not empty ones")
+                .help("Copy subdirectories recursively (excluding empty ones)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("empty-dirs")
                 .short('e')
                 .short_alias('E')
-                .help("Copy subdirectories, including empty ones")
+                .help("Copy subdirectories recursively (including empty ones)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("mirror")
                 .long("mir")
-                .help("Mirror a directory tree (equivalent to -e plus --purge)")
+                .alias("mirror")
+                .help("Mirror mode: make destination exactly like source (deletes extra files)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("purge")
                 .long("purge")
-                .help("Delete dest files/dirs that no longer exist in source")
+                .help("Delete destination files/directories that don't exist in source")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("list-only")
                 .short('l')
                 .short_alias('L')
-                .help("List only - don't copy, timestamp or delete any files")
+                .help("List mode: show what would be done without making changes")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("move-files")
                 .long("mov")
-                .help("Move files (delete source after successful copy). WARNING: If sync is interrupted and restarted, already moved files will be lost!")
+                .help("Move files: delete from source after successful copy (CAUTION: interruption may cause data loss)")
                 .action(clap::ArgAction::SetTrue)
         )
 
@@ -154,29 +156,30 @@ fn build_cli() -> Command {
         .arg(
             Arg::new("exclude-files")
                 .long("xf")
+                .alias("exclude")
                 .value_name("PATTERN")
-                .help("Exclude files matching given patterns")
+                .help("Exclude files matching pattern (can be used multiple times)")
                 .action(clap::ArgAction::Append)
         )
         .arg(
             Arg::new("exclude-dirs")
                 .long("xd")
                 .value_name("PATTERN")
-                .help("Exclude directories matching given patterns")
+                .help("Exclude directories matching pattern (can be used multiple times)")
                 .action(clap::ArgAction::Append)
         )
         .arg(
             Arg::new("min-size")
                 .long("min")
                 .value_name("SIZE")
-                .help("Minimum file size - exclude files smaller than SIZE bytes")
+                .help("Skip files smaller than SIZE bytes")
                 .value_parser(clap::value_parser!(u64))
         )
         .arg(
             Arg::new("max-size")
                 .long("max")
                 .value_name("SIZE")
-                .help("Maximum file size - exclude files bigger than SIZE bytes")
+                .help("Skip files larger than SIZE bytes")
                 .value_parser(clap::value_parser!(u64))
         )
 
@@ -185,13 +188,13 @@ fn build_cli() -> Command {
             Arg::new("copy-flags")
                 .long("copy")
                 .value_name("FLAGS")
-                .help("What to copy: D=Data, A=Attributes, T=Timestamps, S=Security, O=Owner, U=aUditing (default: DAT)")
+                .help("Specify what to copy: D=Data, A=Attributes, T=Timestamps, S=Security, O=Owner, U=Auditing")
                 .default_value("DAT")
         )
         .arg(
             Arg::new("copy-all")
                 .long("copyall")
-                .help("Copy all file info including security/ownership (equivalent to --copy DATSOU)")
+                .help("Copy all metadata: data, attributes, timestamps, security, ownership")
                 .action(clap::ArgAction::SetTrue)
         )
 
@@ -202,44 +205,43 @@ fn build_cli() -> Command {
                 .long("verbose")
                 .alias("Verbose")
                 .alias("VERBOSE")
-                .help("Produce verbose output (-v shows operations preview, -vv shows all operations)")
+                .help("Verbose output (-v: show preview and progress, -vv: show all file operations)")
                 .action(clap::ArgAction::Count)
         )
         .arg(
             Arg::new("confirm")
                 .long("confirm")
-                .help("Prompt for confirmation before executing operations")
+                .help("Ask for confirmation before starting sync")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
-            Arg::new("progress")
-                .short('p')
-                .long("progress")
-                .help("Show progress bar with percentage copied")
+            Arg::new("no-progress")
+                .long("no-progress")
+                .help("Disable the progress spinner")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("no-report-errors")
                 .long("no-report-errors")
-                .help("Disable automatic error report file generation")
+                .help("Don't create error report file on failures")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("log-file")
                 .long("log")
                 .value_name("FILE")
-                .help("Output status to log file (overwrite existing)")
+                .help("Save operation log to FILE (overwrites existing)")
         )
         .arg(
             Arg::new("eta")
                 .long("eta")
-                .help("Show estimated time of arrival and progress updates")
+                .help("Show ETA and detailed progress information")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("debug")
                 .long("debug")
-                .help("Enable debug logging output")
+                .help("Enable debug output for troubleshooting")
                 .action(clap::ArgAction::SetTrue)
         )
 
@@ -248,7 +250,7 @@ fn build_cli() -> Command {
             Arg::new("retry-count")
                 .long("retry")
                 .value_name("NUM")
-                .help("Number of retries on failed copies (default: 0)")
+                .help("Retry failed operations N times")
                 .default_value("0")
                 .value_parser(clap::value_parser!(u32))
         )
@@ -258,7 +260,7 @@ fn build_cli() -> Command {
                 .short_alias('W')
                 .long("wait")
                 .value_name("SECONDS")
-                .help("Wait time between retries in seconds (default: 30)")
+                .help("Wait N seconds between retries")
                 .default_value("30")
                 .value_parser(clap::value_parser!(u32))
         )
@@ -268,7 +270,7 @@ fn build_cli() -> Command {
             Arg::new("threads")
                 .long("mt")
                 .value_name("NUM")
-                .help("Do multi-threaded copies with NUM threads (default: CPU cores)")
+                .help("Use N threads for parallel operations (default: CPU count)")
                 .value_parser(clap::value_parser!(usize))
         )
         .arg(
@@ -278,7 +280,7 @@ fn build_cli() -> Command {
                 .long("block-size")
                 .alias("blocksize")
                 .value_name("SIZE")
-                .help("Block size for delta algorithm in bytes (default: 1024). Smaller blocks find more matches but use more CPU/memory. Larger blocks are faster but may transfer more data.")
+                .help("Delta transfer block size in bytes (smaller = more precise, larger = faster)")
                 .value_parser(clap::value_parser!(usize))
         )
 
@@ -287,28 +289,28 @@ fn build_cli() -> Command {
             Arg::new("small-file-threshold")
                 .long("small-threshold")
                 .value_name("SIZE")
-                .help("Size threshold for small files in bytes (default: 262144 / 256KB). Files up to this size use parallel batch processing.")
+                .help("Files smaller than SIZE use parallel batch processing (default: 256KB)")
                 .value_parser(clap::value_parser!(u64))
         )
         .arg(
             Arg::new("medium-file-threshold")
                 .long("medium-threshold")
                 .value_name("SIZE")
-                .help("Size threshold for medium files in bytes (default: 16777216 / 16MB). Files between small and medium thresholds use optimized delta transfer.")
+                .help("Files between small and SIZE use optimized transfer (default: 16MB)")
                 .value_parser(clap::value_parser!(u64))
         )
         .arg(
             Arg::new("large-file-threshold")
                 .long("large-threshold")
                 .value_name("SIZE")
-                .help("Size threshold for large files in bytes (default: 104857600 / 100MB). Files above this use memory-mapped I/O and parallel chunks.")
+                .help("Files larger than SIZE use memory-mapped I/O (default: 100MB)")
                 .value_parser(clap::value_parser!(u64))
         )
         .arg(
             Arg::new("batch-file-count-threshold")
                 .long("batch-count")
                 .value_name("COUNT")
-                .help("File count threshold for batching small files (default: 100). Directories with more than this many small files will use batch mode.")
+                .help("Use batch mode when directory has more than N small files (default: 100)")
                 .value_parser(clap::value_parser!(usize))
         )
 
@@ -317,21 +319,21 @@ fn build_cli() -> Command {
             Arg::new("recursive")
                 .short('r')
                 .long("recursive")
-                .help("Copy directories recursively (automatically enabled for directory sources)")
+                .help("Recursive copy (auto-enabled for directories)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("archive")
                 .short('a')
                 .long("archive")
-                .help("Archive mode - equivalent to -rlptgoD (recursive, links, perms, times, group, owner, devices)")
+                .help("Archive mode: preserve all metadata (like rsync -a)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("compress")
                 .short('z')
                 .short_alias('Z')
-                .help("Enable compression during transfer (useful for text files or slow networks)")
+                .help("Compress data during transfer (automatic algorithm selection)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
@@ -339,41 +341,47 @@ fn build_cli() -> Command {
                 .short('n')
                 .short_alias('N')
                 .long("dry-run")
-                .help("Perform a trial run with no changes made")
+                .help("Dry run: show what would be done without making changes")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("no-batch")
                 .long("no-batch")
-                .help("Disable tar batching for small files")
+                .help("Don't use tar batching optimization for small files")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("force-tar")
+                .long("force-tar")
+                .help("Force tar streaming mode (skip analysis)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("checksum")
                 .short('c')
                 .short_alias('C')
-                .help("Use checksums to determine if files should be updated (slower but accurate)")
+                .help("Compare files using checksums instead of size/time")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("no-smart")
                 .long("no-smart")
-                .help("Disable smart strategy selection (force simple delta mode)")
+                .help("Disable automatic strategy selection")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("strategy")
                 .long("strategy")
                 .value_name("MODE")
-                .help("Force a specific sync strategy: simple, delta, batch, parallel, or mixed")
-                .value_parser(["simple", "delta", "batch", "parallel", "mixed"])
+                .help("Force strategy: delta, parallel, or mixed (default: auto-select)")
+                .value_parser(["delta", "parallel", "mixed"])
         )
 
         // Linux-specific options
         .arg(
             Arg::new("linux-optimized")
                 .long("linux-optimized")
-                .help("Enable Linux-specific optimizations (splice, io_uring, etc.)")
+                .help("Enable Linux-specific optimizations (io_uring, splice, FIEMAP)")
                 .action(clap::ArgAction::SetTrue)
                 .hide(cfg!(not(target_os = "linux")))
         )
@@ -382,45 +390,45 @@ fn build_cli() -> Command {
         .arg(
             Arg::new("links")
                 .long("links")
-                .help("Preserve symlinks (default behavior)")
+                .help("Copy symlinks as symlinks (default)")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("deref")
                 .long("deref")
-                .help("Dereference symlinks - copy the files they point to")
+                .help("Follow symlinks and copy target files")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("no-links")
                 .long("no-links")
-                .help("Skip all symlinks")
+                .help("Don't process symlinks")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("reflink")
                 .long("reflink")
                 .value_name("MODE")
-                .help("Control when to use copy-on-write clones (always, auto, never)")
+                .help("Reflink/COW mode: always, auto (default), or never")
                 .value_parser(["always", "auto", "never"])
                 .default_value("auto"),
         )
         .arg(
             Arg::new("enterprise")
                 .long("enterprise")
-                .help("Enable enterprise mode with maximum reliability (integrity verification, atomic operations, audit trails)")
+                .help("Enterprise mode: maximum reliability with integrity checks and atomic operations")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("verify-integrity")
                 .long("verify-integrity")
-                .help("Verify data integrity with checksums after each copy operation")
+                .help("Verify file integrity after copying (enterprise feature)")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("atomic-operations")
                 .long("atomic-operations") 
-                .help("Use atomic file operations to prevent corruption (enterprise feature)")
+                .help("Use atomic operations for corruption prevention (enterprise feature)")
                 .action(clap::ArgAction::SetTrue),
         )
 }
@@ -444,7 +452,7 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     // Check if the source exists
     if !source.exists() {
         eprintln!(
-            "\n  ❌ Error: Source path does not exist: {}\n",
+            "\n  Error: Source path does not exist: {}\n",
             source.display()
         );
         std::process::exit(1);
@@ -455,9 +463,15 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     let verbose = matches.get_count("verbose");
     let confirm = matches.get_flag("confirm");
     let dry_run = matches.get_flag("dry-run") || matches.get_flag("list-only");
-    let show_progress = matches.get_flag("progress");
+    
+    // ALWAYS show spinner unless --no-progress is specified
+    // User requirement: "spinner in EVERY scenario"
+    let no_progress = matches.get_flag("no-progress");
+    let show_progress = !no_progress;  // Show spinner in ALL scenarios unless explicitly disabled
+    
     let no_report_errors = matches.get_flag("no-report-errors");
     let no_batch = matches.get_flag("no-batch");
+    let force_tar = matches.get_flag("force-tar");
     let move_files = matches.get_flag("move-files");
     let checksum = matches.get_flag("checksum");
     let debug = matches.get_flag("debug");
@@ -471,7 +485,6 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
         Some("never") => ReflinkMode::Never,
         _ => ReflinkMode::Auto, // Default to auto
     };
-    let forced_strategy = matches.get_one::<String>("strategy").cloned();
 
     // Parse symlink handling options
     let links = matches.get_flag("links");
@@ -482,7 +495,7 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     let symlink_count = [links, deref, no_links].iter().filter(|&&x| x).count();
     if symlink_count > 1 {
         eprintln!(
-            "\n  ❌ Error: Only one symlink option can be specified: --links, --deref, or --no-links\n"
+            "\n  Error: Only one symlink option can be specified: --links, --deref, or --no-links\n"
         );
         std::process::exit(1);
     }
@@ -562,7 +575,7 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
     let max_threads = get_max_thread_count();
     if threads > max_threads {
         eprintln!(
-            "\n  ❌ Error: Maximum thread count is {max_threads} to avoid system file handle limits."
+            "\n  Error: Maximum thread count is {max_threads} to avoid system file handle limits."
         );
         eprintln!("     Requested: {threads}, Maximum allowed: {max_threads}\n");
         std::process::exit(1);
@@ -609,7 +622,6 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
         reflink,
         #[cfg(target_os = "linux")]
         linux_optimized,
-        forced_strategy,
         symlink_behavior,
         no_report_errors,
         debug,
@@ -617,6 +629,10 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
         verify_integrity,
         atomic_operations,
         no_batch,
+        force_tar,
+        prefer_delta: false,
+        force_no_delta: false,
+        use_hybrid_dam: None, // TODO: Add CLI flag for Hybrid Dam
         small_file_threshold,
         medium_file_threshold,
         large_file_threshold,
@@ -629,15 +645,13 @@ fn parse_sync_options(matches: &clap::ArgMatches, config: &robosync::options::Co
 
 /// Display sync configuration and warnings
 fn display_sync_info(source: &PathBuf, destination: &PathBuf, sync_options: &SyncOptions, threads: usize) {
-    // Print header without lines
-    if !sync_options.show_progress {
-        println!(
-            "{} v{}: {}",
-            "RoboSync".color_bold_if(Color::Cyan),
-            env!("CARGO_PKG_VERSION").color_if(Color::White),
-            "Fast parallel file synchronization".color_if(Color::White)
-        );
-    }
+    // Always print header - user requirement: show app name and version on startup
+    println!(
+        "{} v{}: {}",
+        "RoboSync".color_bold_if(Color::Cyan),
+        env!("CARGO_PKG_VERSION").color_if(Color::White),
+        "Fast parallel file synchronization".color_if(Color::White)
+    );
 
     // Calculate the max width needed for all content
     let source_str = source.display().to_string();
@@ -694,31 +708,29 @@ fn display_sync_info(source: &PathBuf, destination: &PathBuf, sync_options: &Syn
 
     let options_str = all_options.join(" ");
 
-    // Display configuration
-    if !sync_options.show_progress {
-        println!();
+    // Always display configuration - needed for user to see what's happening
+    println!();
+    println!(
+        "{}  {}",
+        "Source:".color_if(Color::White),
+        source_str.as_str().color_if(Color::Green)
+    );
+    println!(
+        "{}    {}",
+        "Dest:".color_if(Color::White),
+        dest_str.as_str().color_if(Color::Yellow)
+    );
+    if !options_str.is_empty() {
         println!(
-            "{}  {}",
-            "Source:".color_if(Color::White),
-            source_str.as_str().color_if(Color::Green)
+            "{} {}",
+            "Options:".color_if(Color::White),
+            options_str.as_str().color_if(Color::DarkGrey)
         );
-        println!(
-            "{}    {}",
-            "Dest:".color_if(Color::White),
-            dest_str.as_str().color_if(Color::Yellow)
-        );
-        if !options_str.is_empty() {
-            println!(
-                "{} {}",
-                "Options:".color_if(Color::White),
-                options_str.as_str().color_if(Color::DarkGrey)
-            );
-        }
     }
 
     // Warn about dangerous combinations
     if sync_options.move_files && sync_options.mirror {
-        eprintln!("  ⚠️  WARNING: Using --mov with --mir is dangerous!");
+        eprintln!("  WARNING: Using --mov with --mir is dangerous!");
         eprintln!("If the sync is interrupted, source files already moved will be lost.");
         eprintln!("Consider using --mir without --mov for safety.");
         eprintln!();
@@ -726,53 +738,27 @@ fn display_sync_info(source: &PathBuf, destination: &PathBuf, sync_options: &Syn
 
     // Show enterprise mode notification
     if sync_options.enterprise_mode && sync_options.verbose > 0 {
-        eprintln!("🔒 Enterprise mode enabled: Data integrity verification, atomic operations, and audit trails active");
+        eprintln!("Enterprise mode enabled: Data integrity verification, atomic operations, and audit trails active");
     }
 }
 
 /// Execute the synchronization
 fn execute_sync(source: PathBuf, destination: PathBuf, sync_options: SyncOptions, threads: usize, block_size: usize) -> Result<()> {
+    let start_time = std::time::Instant::now();
     if !sync_options.dry_run {
-        if sync_options.forced_strategy.is_some() {
-            // Diagnostic override - use legacy smart mode with specific strategy
-            let config = ParallelSyncConfig {
-                worker_threads: threads,
-                io_threads: threads,
-                block_size,
-                max_parallel_files: threads * 2,
-            };
+        // Intelligent auto-selection based on workload
+        let config = ParallelSyncConfig {
+            worker_threads: threads,
+            io_threads: threads,
+            block_size,
+            max_parallel_files: threads * 2,
+        };
 
-            let mut syncer = ParallelSyncer::new(config);
-            if let Some(ref strategy) = sync_options.forced_strategy {
-                println!("Diagnostic mode: using {strategy} strategy");
-            }
-            let stats = syncer.synchronize_smart(source, destination, sync_options.clone())?;
+        let mut syncer = ParallelSyncer::new(config);
+        let stats = syncer.synchronize_smart(source, destination, sync_options)?;
 
-            // Print summary statistics when not using progress bar
-            if !sync_options.show_progress {
-                print_sync_summary(&stats);
-            }
-        } else {
-            // Default: mixed mode (optimal for all scenarios)
-            // Force mixed mode in sync options and use smart mode infrastructure
-            let mut mixed_options = sync_options.clone();
-            mixed_options.forced_strategy = Some("mixed".to_string());
-
-            let config = ParallelSyncConfig {
-                worker_threads: threads,
-                io_threads: threads,
-                block_size,
-                max_parallel_files: threads * 2,
-            };
-
-            let mut syncer = ParallelSyncer::new(config);
-            let stats = syncer.synchronize_smart(source, destination, mixed_options)?;
-
-            // Print summary statistics when not using progress bar
-            if !sync_options.show_progress {
-                print_sync_summary(&stats);
-            }
-        }
+        // Always print summary statistics
+        print_sync_summary(&stats, start_time.elapsed());
     } else {
         // Dry run mode
         sync::synchronize_with_options(source, destination, threads, sync_options)?;
@@ -782,7 +768,7 @@ fn execute_sync(source: PathBuf, destination: PathBuf, sync_options: SyncOptions
 }
 
 /// Print synchronization summary
-fn print_sync_summary(stats: &robosync::sync_stats::SyncStats) {
+fn print_sync_summary(stats: &robosync::sync_stats::SyncStats, duration: std::time::Duration) {
     println!("\nSummary:");
     println!("Files copied: {}", stats.files_copied());
     println!("Files deleted: {}", stats.files_deleted());
@@ -794,9 +780,51 @@ fn print_sync_summary(stats: &robosync::sync_stats::SyncStats) {
         println!("Reflinks fallback: {}", reflink_fallbacks);
     }
     println!("Errors: {}", stats.errors());
+    
+    // Add timing and throughput stats like robocopy
+    let elapsed_secs = duration.as_secs_f64();
+    println!("Elapsed time: {:.2}s", elapsed_secs);
+    
+    // Show speed only if data was transferred
+    if stats.bytes_transferred() > 0 && elapsed_secs > 0.0 {
+        let bytes_per_sec = stats.bytes_transferred() as f64 / elapsed_secs;
+        let mb_per_min = (stats.bytes_transferred() as f64 / (1024.0 * 1024.0)) / (elapsed_secs / 60.0);
+        println!("Speed: {:.0} Bytes/sec", bytes_per_sec);
+        println!("Speed: {:.3} MB/min", mb_per_min);
+    }
 }
 
 fn main() -> Result<()> {
+    // Set up panic handler to write crash logs
+    std::panic::set_hook(Box::new(|panic_info| {
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let crash_file = format!("robosync_crash_{}.log", timestamp);
+        
+        let crash_details = format!(
+            "RoboSync Crash Report - {}\n\
+            =================================\n\
+            {}\n\n\
+            Location: {}\n\n\
+            Please report this crash with the above details.\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            panic_info,
+            panic_info.location().map_or("Unknown".to_string(), |loc| {
+                format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
+            })
+        );
+        
+        if let Err(_) = std::fs::write(&crash_file, &crash_details) {
+            eprintln!("Failed to write crash log to {}", crash_file);
+        } else {
+            eprintln!("Crash details saved to: {}", crash_file);
+        }
+        eprintln!("{}", crash_details);
+    }));
+    
+    // Initialize global thread pool at application startup (Phase 1 optimization)
+    // This eliminates the 27ms thread spawning overhead identified in performance analysis
+    worker_pool::initialize_global_pool(None)?;
+    
     let matches = build_cli().get_matches();
     
     // Load config from .robosync.toml if it exists

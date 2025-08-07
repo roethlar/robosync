@@ -114,14 +114,29 @@ impl StreamingDelta {
 
         let options = SyncOptions::default(); // This will be replaced with actual options later
         let buffer_sizer = BufferSizer::new(&options);
-        let buffer_size = buffer_sizer.calculate_buffer_size(source_size);
-
+        let mut buffer_size = buffer_sizer.calculate_buffer_size(source_size);
+        
+        // Safety check: Ensure minimum buffer size to prevent crashes
+        const MIN_BUFFER_SIZE: usize = 1024 * 1024; // 1MB minimum
+        const MAX_SAFE_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64MB maximum
+        
+        if buffer_size == 0 {
+            eprintln!("Warning: BufferSizer returned 0 size, using minimum buffer");
+            buffer_size = MIN_BUFFER_SIZE;
+        }
+        
+        // Cap buffer size to prevent memory issues
+        buffer_size = std::cmp::min(buffer_size, MAX_SAFE_BUFFER_SIZE);
+        
         let mut lookahead_buffer = vec![0u8; buffer_size];
         let mut last_progress_report = std::time::Instant::now();
         let report_interval = std::time::Duration::from_secs(5);
 
         while source_offset < source_size {
-            let bytes_to_read = std::cmp::min(CHUNK_SIZE, (source_size - source_offset) as usize);
+            let bytes_to_read = std::cmp::min(
+                std::cmp::min(CHUNK_SIZE, (source_size - source_offset) as usize),
+                buffer_size  // Also limit by actual buffer size
+            );
             source_reader.read_exact(&mut lookahead_buffer[..bytes_to_read])?;
 
             let (matches, non_match_len) =

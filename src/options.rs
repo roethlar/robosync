@@ -98,7 +98,6 @@ pub struct SyncOptions {
     pub reflink: ReflinkMode,
     #[cfg(target_os = "linux")]
     pub linux_optimized: bool,
-    pub forced_strategy: Option<String>,
     pub symlink_behavior: SymlinkBehavior,
     pub no_report_errors: bool,
     pub debug: bool,
@@ -106,7 +105,15 @@ pub struct SyncOptions {
     pub verify_integrity: bool,
     pub atomic_operations: bool,
     pub no_batch: bool,
+    pub force_tar: bool,
     // shimmer_model_path removed - AI features moved to separate project
+
+    // Delta transfer preference for incremental backups
+    pub prefer_delta: bool,
+    pub force_no_delta: bool,
+
+    // Hybrid Dam Architecture (Phase 2)
+    pub use_hybrid_dam: Option<bool>,
 
     // Configurable file size thresholds
     pub small_file_threshold: Option<u64>,
@@ -142,7 +149,6 @@ impl Default for SyncOptions {
             reflink: ReflinkMode::default(),
             #[cfg(target_os = "linux")]
             linux_optimized: false,
-            forced_strategy: None,
             symlink_behavior: SymlinkBehavior::Preserve,
             no_report_errors: false,
             debug: false,
@@ -150,6 +156,10 @@ impl Default for SyncOptions {
             verify_integrity: false,
             atomic_operations: false,
             no_batch: false,
+            force_tar: false,
+            prefer_delta: false,
+            force_no_delta: false,
+            use_hybrid_dam: None,
             small_file_threshold: None,
             medium_file_threshold: None,
             large_file_threshold: None,

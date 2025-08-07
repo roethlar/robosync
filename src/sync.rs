@@ -19,7 +19,7 @@ pub fn synchronize(
     _compress: bool,
 ) -> Result<()> {
     // Create a logger without file output for basic sync
-    let logger = SyncLogger::new(None, false)?;
+    let logger = SyncLogger::new(None, false, 0)?;
 
     logger.log("Starting synchronization...");
     logger.log(&format!("  Source: {}", source.display()));
@@ -124,8 +124,14 @@ pub fn synchronize_with_options(
     _threads: usize,
     mut options: SyncOptions,
 ) -> Result<()> {
-    // Fast path for small files scenario - bypass most overhead
-    if !options.purge && source.is_dir() && crate::small_file_optimizer::is_small_files_scenario(&source).unwrap_or(false) {
+    // Check if any filters are specified
+    let has_filters = !options.exclude_files.is_empty() || 
+                     !options.exclude_dirs.is_empty() || 
+                     options.min_size.is_some() || 
+                     options.max_size.is_some();
+    
+    // Fast path for small files scenario - bypass most overhead (only if no filters)
+    if !options.purge && !has_filters && source.is_dir() && crate::small_file_optimizer::is_small_files_scenario(&source).unwrap_or(false) {
         if options.show_progress {
             println!("Fast path for small files detected");
         }
@@ -139,7 +145,7 @@ pub fn synchronize_with_options(
     }
 
     // Create logger with optional log file
-    let logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta)?;
+    let logger = SyncLogger::new(options.log_file.as_deref(), options.show_eta, options.verbose)?;
 
     // Detect destination filesystem capabilities and adjust copy flags if needed
     let dest_parent = if destination.exists() {
@@ -552,7 +558,7 @@ mod tests {
 
         fs::write(&source, b"Hello, World!")?;
 
-        let logger = SyncLogger::new(None, false)?;
+        let logger = SyncLogger::new(None, false, 0)?;
         sync_single_file(&source, &dest, &logger)?;
 
         let dest_content = fs::read(&dest)?;

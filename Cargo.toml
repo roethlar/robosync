@@ -81,8 +81,8 @@ parking_lot = "0.12"
 io-uring = "0.6"
 nix = { version = "0.27", features = ["fs", "mman"] }
 
-# Platform-specific filesystem detection
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))'.dependencies]
+# Platform-specific filesystem detection for macOS and FreeBSD
+[target.'cfg(any(target_os = "macos", target_os = "freebsd"))'.dependencies]
 nix = { version = "0.27", features = ["fs"] }
 
 # Cross-platform support
@@ -99,7 +99,7 @@ libc = "0.2"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi", "winbase", "winnt", "winerror", "errhandlingapi", "ioapiset", "winioctl", "wow64apiset"] }
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "handleapi", "winbase", "winnt", "winerror", "errhandlingapi", "ioapiset", "winioctl", "wow64apiset", "sysinfoapi", "consoleapi", "processenv"] }
 
 [dev-dependencies]
 tempfile = "3.0"
