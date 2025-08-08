@@ -10,6 +10,7 @@ use robosync::parallel_sync::{ParallelSyncConfig, ParallelSyncer};
 use robosync::reflink::ReflinkMode;
 use robosync::sync;
 use robosync::worker_pool;
+use robosync::thread_pool;
 
 /// Get the maximum safe thread count based on OS file handle limits
 fn get_max_thread_count() -> usize {
@@ -823,6 +824,7 @@ fn main() -> Result<()> {
     
     // Initialize global thread pool at application startup (Phase 1 optimization)
     // This eliminates the 27ms thread spawning overhead identified in performance analysis
+    thread_pool::init_thread_pool();
     worker_pool::initialize_global_pool(None)?;
     
     let matches = build_cli().get_matches();

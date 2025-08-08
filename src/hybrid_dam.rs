@@ -10,10 +10,10 @@
 //! - Scales thresholds based on network vs local transfers
 //! - Uses platform-specific optimizations where available
 
-use std::collections::{VecDeque, HashMap};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::io::Read;
+use std::process::Command;
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -31,25 +31,9 @@ use crate::file_list::FileOperation;
 use crate::sync_stats::SyncStats;
 use crate::progress::SyncProgress;
 use crate::error_logger::ErrorLogger;
-use lazy_static::lazy_static;
-
-// ========== GLOBAL RAYON POOL (Per Expert Guidance - 10x Performance) ==========
-// "Persistent Rayon pool, pre-allocated" - eliminates 27ms thread spawning overhead
-lazy_static! {
-    /// Global Rayon thread pool - initialized ONCE at startup
-    /// Expert guidance: "Leverage Rayon for persistent, low-overhead pools (10x faster)"
-    /// Default: num_cpus * 1.5-2, scale to 16-64 for 10GbE
-    static ref GLOBAL_RAYON_POOL: ThreadPool = {
-        let num_threads = (num_cpus::get() as f32 * 1.5) as usize;
-        let pool_size = num_threads.clamp(4, 64); // Min 4, max 64 threads
-        
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(pool_size)
-            .thread_name(|i| format!("robosync-worker-{}", i))
-            .build()
-            .expect("Failed to create global Rayon pool")
-    };
-}
+use crate::thread_pool;
+// Use the centralized global thread pool from thread_pool module
+// This eliminates duplication and ensures consistent thread management
 
 // ========== DISPLAY STRUCTURES (migrated from mixed_strategy.rs) ==========
 
@@ -1109,8 +1093,7 @@ impl HybridDam {
         let (pool_tx, pool_rx) = mpsc::channel();
         let (slicer_tx, slicer_rx) = mpsc::channel();
         
-        // Initialize the global Rayon pool on first access
-        lazy_static::initialize(&GLOBAL_RAYON_POOL);
+        // Global thread pool is initialized in main.rs at startup
         
         Self {
             dam: SmallFileDam::new(config.clone(), buffer_sizer.clone()),
@@ -1176,8 +1159,8 @@ impl HybridDam {
                 std::mem::take(&mut *batch_guard)
             };
             
-            // Submit batch to Rayon pool - returns immediately!
-            GLOBAL_RAYON_POOL.spawn(move || {
+            // Submit batch to global thread pool - returns immediately!
+            thread_pool::spawn(move || {
                 // Process batch of files together (reduces sync overhead)
                 let mut batch_result = TransferResult {
                     files_attempted: files_to_process.len(),
@@ -1215,7 +1198,7 @@ impl HybridDam {
         let tx = self.slicer_results_tx.clone();
         
         // Large files go individually (no batching needed)
-        GLOBAL_RAYON_POOL.spawn(move || {
+        thread_pool::spawn(move || {
             let start = Instant::now();
             match slicer.process_file(file) {
                 Ok(mut result) => {
@@ -1249,7 +1232,7 @@ impl HybridDam {
             let pool = self.pool.clone();
             let tx = self.pool_results_tx.clone();
             
-            GLOBAL_RAYON_POOL.spawn(move || {
+            thread_pool::spawn(move || {
                 let mut batch_result = TransferResult {
                     files_attempted: pool_files.len(),
                     files_copied: 0,
@@ -1499,118 +1482,131 @@ impl HybridDam {
 
         // Setup for parallel execution using worker pools
         let (tx, rx) = mpsc::channel();
-        let mut handles = vec![];
         let start_time = Instant::now();
+        
+        // Count how many worker types we'll spawn
+        let mut worker_count = 0;
+        if !categorized.dam_files.is_empty() { worker_count += 1; }
+        if !categorized.pool_files.is_empty() { worker_count += 1; }
+        if !categorized.slicer_files.is_empty() { worker_count += 1; }
+        if !categorized.delta_files.is_empty() { worker_count += 1; }
+        if !categorized.deletes.is_empty() { worker_count += 1; }
+        
+        // Extract delta_analyzer before the scope to avoid borrowing self
+        let delta_analyzer = Arc::clone(&self.delta_analyzer);
+        
+        // Use rayon::scope for spawning parallel tasks that need to be joined
+        // This eliminates the need for JoinHandles and leverages the global thread pool
+        thread_pool::GLOBAL_THREAD_POOL.scope(|s| {
+            // Process Dam files (small files with tar streaming)
+            if !categorized.dam_files.is_empty() {
+                let tx = tx.clone();
+                let dam_files = categorized.dam_files.clone();
+                let source_root = source_root.to_path_buf();
+                let dest_root = dest_root.to_path_buf();
+                let options = options.clone();
+                let pb_clone = pb.clone();
+                let error_handle = error_handle.clone();
 
-        // Process Dam files (small files with tar streaming)
-        if !categorized.dam_files.is_empty() {
-            let tx = tx.clone();
-            let dam_files = categorized.dam_files.clone();
-            let source_root = source_root.to_path_buf();
-            let dest_root = dest_root.to_path_buf();
-            let options = options.clone();
-            let pb_clone = pb.clone();
-            let error_handle = error_handle.clone();
+                s.spawn(move |_| {
+                    let result = Self::process_dam_files_with_tar_streaming(
+                        &dam_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                        start_time,
+                        &error_handle,
+                    );
+                    let _ = tx.send(("dam", result));
+                });
+            }
 
-            let handle = std::thread::spawn(move || {
-                let result = Self::process_dam_files_with_tar_streaming(
-                    &dam_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                    start_time,
-                    &error_handle,
-                );
-                let _ = tx.send(("dam", result));
-            });
-            handles.push(handle);
-        }
+            // Process Pool files (medium files with parallel workers)  
+            if !categorized.pool_files.is_empty() {
+                let tx = tx.clone();
+                let pool_files = categorized.pool_files.clone();
+                let source_root = source_root.to_path_buf();
+                let dest_root = dest_root.to_path_buf();
+                let options = options.clone();
+                let pb_clone = pb.clone();
 
-        // Process Pool files (medium files with parallel workers)  
-        if !categorized.pool_files.is_empty() {
-            let tx = tx.clone();
-            let pool_files = categorized.pool_files.clone();
-            let source_root = source_root.to_path_buf();
-            let dest_root = dest_root.to_path_buf();
-            let options = options.clone();
-            let pb_clone = pb.clone();
+                s.spawn(move |_| {
+                    let result = Self::process_pool_files_parallel(
+                        &pool_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                    );
+                    let _ = tx.send(("pool", result));
+                });
+            }
 
-            let handle = std::thread::spawn(move || {
-                let result = Self::process_pool_files_parallel(
-                    &pool_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                );
-                let _ = tx.send(("pool", result));
-            });
-            handles.push(handle);
-        }
+            // Process Slicer files (large files with memory-mapped I/O)
+            if !categorized.slicer_files.is_empty() {
+                let tx = tx.clone();
+                let slicer_files = categorized.slicer_files.clone();
+                let source_root = source_root.to_path_buf();
+                let dest_root = dest_root.to_path_buf();
+                let options = options.clone();
+                let pb_clone = pb.clone();
 
-        // Process Slicer files (large files with memory-mapped I/O)
-        if !categorized.slicer_files.is_empty() {
-            let tx = tx.clone();
-            let slicer_files = categorized.slicer_files.clone();
-            let source_root = source_root.to_path_buf();
-            let dest_root = dest_root.to_path_buf();
-            let options = options.clone();
-            let pb_clone = pb.clone();
+                s.spawn(move |_| {
+                    let result = Self::process_slicer_files_mmap(
+                        &slicer_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                    );
+                    let _ = tx.send(("slicer", result));
+                });
+            }
 
-            let handle = std::thread::spawn(move || {
-                let result = Self::process_slicer_files_mmap(
-                    &slicer_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                );
-                let _ = tx.send(("slicer", result));
-            });
-            handles.push(handle);
-        }
+            // Process Delta files (very large files with concurrent delta analysis)
+            if !categorized.delta_files.is_empty() {
+                let tx = tx.clone();
+                let delta_files = categorized.delta_files.clone();
+                let source_root = source_root.to_path_buf();
+                let dest_root = dest_root.to_path_buf();
+                let options = options.clone();
+                let pb_clone = pb.clone();
+                let delta_analyzer = delta_analyzer.clone();
 
-        // Process Delta files (very large files with concurrent delta analysis)
-        if !categorized.delta_files.is_empty() {
-            let tx = tx.clone();
-            let delta_files = categorized.delta_files.clone();
-            let source_root = source_root.to_path_buf();
-            let dest_root = dest_root.to_path_buf();
-            let options = options.clone();
-            let pb_clone = pb.clone();
-            let delta_analyzer = Arc::clone(&self.delta_analyzer);
+                s.spawn(move |_| {
+                    let result = Self::process_delta_files_concurrent(
+                        &delta_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                        delta_analyzer,
+                    );
+                    let _ = tx.send(("delta", result));
+                });
+            }
 
-            let handle = std::thread::spawn(move || {
-                let result = Self::process_delta_files_concurrent(
-                    &delta_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                    delta_analyzer,
-                );
-                let _ = tx.send(("delta", result));
-            });
-            handles.push(handle);
-        }
+            // Process Deletes
+            if !categorized.deletes.is_empty() {
+                let tx = tx.clone();
+                let deletes = categorized.deletes.clone();
+                let options = options.clone();
+                let pb_clone = pb.clone();
 
-        // Process Deletes
-        if !categorized.deletes.is_empty() {
-            let tx = tx.clone();
-            let deletes = categorized.deletes.clone();
-            let options = options.clone();
-            let pb_clone = pb.clone();
-
-            let handle = std::thread::spawn(move || {
-                let result = Self::process_deletes_parallel(&deletes, &options, Some(&pb_clone));
-                let _ = tx.send(("deletes", result));
-            });
-            handles.push(handle);
-        }
+                s.spawn(move |_| {
+                    let result = Self::process_deletes_parallel(&deletes, &options, Some(&pb_clone));
+                    let _ = tx.send(("deletes", result));
+                });
+            }
+        });
+        
+        // Drop the original sender so the receiver knows when all senders are done
+        drop(tx);
 
         // Collect results from all workers
-        for _ in 0..handles.len() {
+        // The scope block above waits for all spawned tasks to complete
+        for _ in 0..worker_count {
             if let Ok((worker_type, result)) = rx.recv() {
                 match result {
                     Ok(stats) => {
@@ -1635,11 +1631,7 @@ impl HybridDam {
             }
         }
 
-        // Wait for all threads to complete
-        for handle in handles {
-            let _ = handle.join();
-        }
-
+        // All threads have already completed due to rayon::scope
         pb.finish_and_clear();
 
         Ok(total_stats)
@@ -1883,7 +1875,13 @@ impl HybridDam {
         
         // CRITICAL: Flush any remaining files in the Dam
         // The Dam buffers small files and must be flushed at the end
+        if options.verbose >= 2 {
+            eprintln!("[DEBUG] Flushing Dam with {} files buffered", self.dam.buffer.len());
+        }
         if let Some(final_batch) = self.dam.flush() {
+            if options.verbose >= 2 {
+                eprintln!("[DEBUG] Processing final Dam batch with {} files", final_batch.files.len());
+            }
             match self.process_dam_batch(final_batch) {
                 Ok(result) => {
                     total_stats.add_bytes_transferred(result.bytes_transferred);
@@ -2033,9 +2031,22 @@ impl HybridDam {
     
     /// Process a dam batch job using optimized batch transfer
     fn process_dam_batch(&self, batch_job: DamBatchJob) -> Result<TransferResult> {
-        // For now, just use individual file processing until tar streaming is fixed on Windows
-        // TODO: Fix tar streaming on Windows - path normalization issues
-        self.process_dam_batch_individual(batch_job)
+        // Use tar streaming on Unix platforms (macOS/Linux) where it works properly
+        // Windows has path normalization issues with tar streaming
+        #[cfg(unix)]
+        {
+            if self.should_use_tar_streaming(&batch_job) {
+                self.process_dam_batch_tar_streaming(&batch_job)
+            } else {
+                self.process_dam_batch_individual(batch_job)
+            }
+        }
+        
+        #[cfg(windows)]
+        {
+            // TODO: Fix tar streaming on Windows - path normalization issues
+            self.process_dam_batch_individual(batch_job)
+        }
     }
     
     /// Process batch using individual file copies
@@ -2068,6 +2079,8 @@ impl HybridDam {
     
     /// Process batch using tar streaming for efficiency
     fn process_dam_batch_tar_streaming(&self, batch_job: &DamBatchJob) -> Result<TransferResult> {
+        eprintln!("[DEBUG] process_dam_batch_tar_streaming: Processing {} files", batch_job.files.len());
+        
         // Convert FileEntry batch to FileOperation format for tar streaming
         let mut file_operations = Vec::new();
         for file_entry in &batch_job.files {
@@ -2078,7 +2091,9 @@ impl HybridDam {
         
         // Find common source and destination roots
         let source_root = if !batch_job.files.is_empty() {
-            batch_job.files[0].src_path.parent().unwrap_or(Path::new("/"))
+            let root = batch_job.files[0].src_path.parent().unwrap_or(Path::new("/"));
+            eprintln!("[DEBUG] Source root: {}", root.display());
+            root
         } else {
             return Ok(TransferResult {
                 files_attempted: 0,
@@ -2091,7 +2106,9 @@ impl HybridDam {
         };
         
         let dest_root = if !batch_job.files.is_empty() {
-            batch_job.files[0].dst_path.parent().unwrap_or(Path::new("/"))
+            let root = batch_job.files[0].dst_path.parent().unwrap_or(Path::new("/"));
+            eprintln!("[DEBUG] Dest root: {}", root.display());
+            root
         } else {
             Path::new("/")
         };
@@ -2128,8 +2145,12 @@ impl HybridDam {
     
     /// Check if tar streaming is suitable for this batch
     fn should_use_tar_streaming(&self, batch_job: &DamBatchJob) -> bool {
+        eprintln!("[DEBUG] should_use_tar_streaming: {} files, {} bytes total", 
+                 batch_job.files.len(), batch_job.total_size);
+        
         // Use tar streaming for batches with multiple small files
         if batch_job.files.len() >= 3 && batch_job.total_size < 100 * 1024 * 1024 {
+            eprintln!("[DEBUG] should_use_tar_streaming: YES - suitable for tar");
             return true;
         }
         
@@ -2218,6 +2239,7 @@ impl HybridDam {
             match op {
                 FileOperation::Create { path } | FileOperation::Update { path, .. } => {
                     let relative = path.strip_prefix(source_root).unwrap_or(path);
+                    eprintln!("[DEBUG] Tar streaming: {} -> {}", path.display(), relative.display());
                     if let Ok(metadata) = path.metadata() {
                         total_bytes += metadata.len();
                     }
@@ -2276,6 +2298,15 @@ impl HybridDam {
             }
             
             builder.finish()?;
+            
+            // Drop builder to release the mutable borrow of writer
+            drop(builder);
+            
+            // CRITICAL FIX: Flush the writer to ensure all buffered data including 
+            // end-of-archive markers are sent through the channel. Without this flush,
+            // the unpacker thread blocks on archive.entries() waiting for data.
+            writer.flush()?;
+            
             Ok(locked_files)
         });
         

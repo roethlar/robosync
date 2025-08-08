@@ -48,8 +48,10 @@ pub mod streaming_batch_fast;
 pub mod speculative_tar;
 pub mod worker_pool;
 pub mod hybrid_dam;
+pub mod thread_pool;
 pub mod concurrent_delta;
 pub mod streaming_walker;
+pub mod adaptive_executor;
 // Core file synchronization modules only
 
 #[cfg(target_os = "linux")]

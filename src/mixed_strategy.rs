@@ -24,6 +24,7 @@ use crate::operation_utils::{
 use crate::options::SyncOptions;
 use crate::progress::SyncProgress;
 use crate::sync_stats::SyncStats;
+use crate::thread_pool;
 
 /// Default size thresholds for categorizing files - optimized for performance
 const DEFAULT_SMALL_FILE_THRESHOLD: u64 = 256 * 1024; // 256KB - increased for better batching
@@ -254,12 +255,23 @@ impl MixedStrategyExecutor {
 
         // Setup for parallel execution
         let (tx, rx) = mpsc::channel();
-        let mut handles = vec![];
+        
+        // Count how many worker types we'll spawn
+        let mut worker_count = 0;
+        if !categorized.small_files.is_empty() { worker_count += 1; }
+        if !categorized.medium_files.is_empty() { worker_count += 1; }
+        if !categorized.large_files.is_empty() { worker_count += 1; }
+        if !categorized.delta_files.is_empty() { worker_count += 1; }
+        if !categorized.deletes.is_empty() { worker_count += 1; }
+        
         let mut worker_info = HashMap::new();
         let start_time = std::time::Instant::now();
 
-        // Process small files in parallel
-        if !categorized.small_files.is_empty() {
+        // Use rayon::scope for spawning parallel tasks that need to be joined
+        // This eliminates the need for JoinHandles and leverages the global thread pool
+        thread_pool::GLOBAL_THREAD_POOL.scope(|s| {
+            // Process small files in parallel
+            if !categorized.small_files.is_empty() {
             let tx = tx.clone();
             let small_files = categorized.small_files.clone();
             let source_root = source_root.to_path_buf();
@@ -278,20 +290,19 @@ impl MixedStrategyExecutor {
                 ),
             );
 
-            let st = start_time;
-            let handle = thread::spawn(move || {
-                let stats = executor.process_small_files_batch(
-                    &small_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                    st,
-                    &error_handle,
-                );
-                let _ = tx.send(("small", stats, worker_start.elapsed()));
-            });
-            handles.push(handle);
+                let st = start_time;
+                s.spawn(move |_| {
+                    let stats = executor.process_small_files_batch(
+                        &small_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                        st,
+                        &error_handle,
+                    );
+                    let _ = tx.send(("small", stats, worker_start.elapsed()));
+                });
         }
 
         // Process medium files in parallel
@@ -314,19 +325,18 @@ impl MixedStrategyExecutor {
                 ),
             );
 
-            let st = start_time;
-            let handle = thread::spawn(move || {
-                let stats = executor.process_medium_files(
-                    &medium_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                    st,
-                );
-                let _ = tx.send(("medium", stats, worker_start.elapsed()));
-            });
-            handles.push(handle);
+                let st = start_time;
+                s.spawn(move |_| {
+                    let stats = executor.process_medium_files(
+                        &medium_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                        st,
+                    );
+                    let _ = tx.send(("medium", stats, worker_start.elapsed()));
+                });
         }
 
         // Process large files in parallel
@@ -349,32 +359,31 @@ impl MixedStrategyExecutor {
                 ),
             );
 
-            let st = start_time;
-            let handle = thread::spawn(move || {
-                let result = std::panic::catch_unwind(|| {
-                    executor.process_large_files(
-                        &large_files,
-                        &source_root,
-                        &dest_root,
-                        &options,
-                        Some(&pb_clone),
-                        st,
-                    )
-                });
+                let st = start_time;
+                s.spawn(move |_| {
+                    let result = std::panic::catch_unwind(|| {
+                        executor.process_large_files(
+                            &large_files,
+                            &source_root,
+                            &dest_root,
+                            &options,
+                            Some(&pb_clone),
+                            st,
+                        )
+                    });
 
-                let stats = match result {
-                    Ok(stats_result) => stats_result,
-                    Err(panic) => {
-                        eprintln!("[ERROR] Large worker thread panicked: {:?}", panic);
-                        Err(anyhow::anyhow!("Large worker thread panicked"))
+                    let stats = match result {
+                        Ok(stats_result) => stats_result,
+                        Err(panic) => {
+                            eprintln!("[ERROR] Large worker thread panicked: {:?}", panic);
+                            Err(anyhow::anyhow!("Large worker thread panicked"))
+                        }
+                    };
+
+                    if let Err(e) = tx.send(("large", stats, worker_start.elapsed())) {
+                        eprintln!("[ERROR] Failed to send large worker results: {:?}", e);
                     }
-                };
-
-                if let Err(e) = tx.send(("large", stats, worker_start.elapsed())) {
-                    eprintln!("[ERROR] Failed to send large worker results: {:?}", e);
-                }
-            });
-            handles.push(handle);
+                });
         }
 
         // Process delta files (very large files)
@@ -397,19 +406,18 @@ impl MixedStrategyExecutor {
                 ),
             );
 
-            let st = start_time;
-            let handle = thread::spawn(move || {
-                let stats = executor.process_delta_files(
-                    &delta_files,
-                    &source_root,
-                    &dest_root,
-                    &options,
-                    Some(&pb_clone),
-                    st,
-                );
-                let _ = tx.send(("delta", stats, worker_start.elapsed()));
-            });
-            handles.push(handle);
+                let st = start_time;
+                s.spawn(move |_| {
+                    let stats = executor.process_delta_files(
+                        &delta_files,
+                        &source_root,
+                        &dest_root,
+                        &options,
+                        Some(&pb_clone),
+                        st,
+                    );
+                    let _ = tx.send(("delta", stats, worker_start.elapsed()));
+                });
         }
 
         // Process deletes in parallel (after all creates/updates start)
@@ -430,26 +438,26 @@ impl MixedStrategyExecutor {
                 ),
             );
 
-            let st = start_time;
-            let handle = thread::spawn(move || {
-                let result = std::panic::catch_unwind(|| {
-                    executor.process_deletes(&deletes, &options, Some(&pb_clone), st)
-                });
+                let st = start_time;
+                s.spawn(move |_| {
+                    let result = std::panic::catch_unwind(|| {
+                        executor.process_deletes(&deletes, &options, Some(&pb_clone), st)
+                    });
 
-                let stats = match result {
-                    Ok(stats_result) => stats_result,
-                    Err(panic) => {
-                        eprintln!("[ERROR] Delete worker thread panicked: {:?}", panic);
-                        Err(anyhow::anyhow!("Delete worker thread panicked"))
+                    let stats = match result {
+                        Ok(stats_result) => stats_result,
+                        Err(panic) => {
+                            eprintln!("[ERROR] Delete worker thread panicked: {:?}", panic);
+                            Err(anyhow::anyhow!("Delete worker thread panicked"))
+                        }
+                    };
+
+                    if let Err(e) = tx.send(("delete", stats, worker_start.elapsed())) {
+                        eprintln!("[ERROR] Failed to send delete worker results: {:?}", e);
                     }
-                };
-
-                if let Err(e) = tx.send(("delete", stats, worker_start.elapsed())) {
-                    eprintln!("[ERROR] Failed to send delete worker results: {:?}", e);
-                }
-            });
-            handles.push(handle);
-        }
+                });
+            }
+        }); // End of rayon::scope block
 
         // Start a status logger thread that shows single-line status updates
         let logger_handle = if !options.show_progress {
@@ -581,10 +589,7 @@ impl MixedStrategyExecutor {
             }
         }
 
-        // Wait for all threads to complete
-        for handle in handles {
-            let _ = handle.join();
-        }
+        // All threads have already completed due to rayon::scope
 
         // Finish progress bar (only if progress is enabled)
         if options.show_progress {

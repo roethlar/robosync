@@ -1136,6 +1136,7 @@ dependencies = [
  "memmap2",
  "nix",
  "num_cpus",
+ "once_cell",
  "parking_lot",
  "rayon",
  "serde",
